@@ -1132,7 +1132,8 @@ void test_codex_usage(const std::filesystem::path &output)
     Settings settings;
     settings.layout = 2;
     settings.theme = 6;
-    settings.font = L"Book Antiqua";
+    // Keep glyph-size assertions independent of optional fonts installed on the machine.
+    settings.font = L"Arial";
     settings.text_color = RGB(232, 217, 183);
     settings.accent_color = RGB(183, 163, 244);
     settings.show_seconds = false;
