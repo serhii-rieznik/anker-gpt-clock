@@ -17,11 +17,13 @@ A lightweight Windows tray app that puts a clock on the display of the
 
 ![Settings window](docs/images/settings.png)
 
-## Run
+## Download and run
+
+[Download the latest Windows release](https://github.com/serhii-rieznik/anker-gpt-clock/releases/latest).
 
 Requires Windows 10 or 11 (x64) and .NET Framework 4.8.
 
-1. Keep all files from the built app folder together and connect the hub by USB.
+1. Extract the ZIP, keep its files together, and connect the hub by USB.
 2. Launch `AnkerClock.exe`.
 3. Open settings from the tray icon, customize your clock, and click **Save changes**.
 
