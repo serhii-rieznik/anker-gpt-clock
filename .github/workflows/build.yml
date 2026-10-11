@@ -1,0 +1,17 @@
+name: Windows build
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: cmake --preset windows-vs2022 -DBUILD_TESTING=ON
+      - run: cmake --build --preset release-vs2022
+      - run: ctest --preset release-vs2022
