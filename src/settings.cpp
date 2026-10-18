@@ -68,11 +68,15 @@ Settings load_settings(const wchar_t *key_path)
     settings.background_path = read_text(key.value, L"BackgroundImage", L"", 32768);
     settings.time_zone = read_text(key.value, L"TimeZone", L"", 128);
     settings.label = read_text(key.value, L"Label", L"", 41);
+    settings.netatmo_module_id = read_text(key.value, L"NetatmoModule", L"", 128);
     settings.theme = static_cast<int>(std::min<DWORD>(read_number(key.value, L"Theme", 0), 6));
     settings.font_size =
         static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"FontSize", 76), 36, 110));
     settings.analog_font_size =
         static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"AnalogFontSize", 20), 12, 32));
+    settings.analog_face = static_cast<int>(std::min<DWORD>(read_number(key.value, L"AnalogFace", 0), 2));
+    settings.reading_font_size =
+        static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"ReadingFontSize", 32), 28, 38));
     settings.font_style = static_cast<int>(std::min<DWORD>(read_number(key.value, L"FontStyle", 0), 3));
     settings.layout = static_cast<int>(std::min<DWORD>(read_number(key.value, L"Layout", 0), 2));
     settings.date_format = static_cast<int>(std::min<DWORD>(read_number(key.value, L"DateFormat", 0), 3));
@@ -80,6 +84,10 @@ Settings load_settings(const wchar_t *key_path)
         static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"Interval", 10), 1, 86400));
     settings.codex_refresh_seconds =
         static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"CodexRefreshSeconds", 60), 60, 86400));
+    settings.netatmo_refresh_seconds =
+        static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"NetatmoRefreshSeconds", 300), 60, 86400));
+    settings.netatmo_readings =
+        static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"NetatmoReadings", 13), 1, 15));
     settings.hub_brightness =
         static_cast<int>(std::clamp<DWORD>(read_number(key.value, L"Brightness", 100), 10, 100));
     settings.vertical_offset =
@@ -96,9 +104,9 @@ Settings load_settings(const wchar_t *key_path)
     settings.show_date = read_number(key.value, L"ShowDate", 1) != 0;
     settings.show_weekday = read_number(key.value, L"ShowWeekday", 1) != 0;
     settings.show_codex_usage = read_number(key.value, L"ShowCodexUsage", 0) != 0;
+    settings.show_netatmo = read_number(key.value, L"ShowNetatmo", 0) != 0;
     settings.pause_on_battery = read_number(key.value, L"PauseOnBattery", 0) != 0;
     settings.show_settings_on_launch = read_number(key.value, L"ShowSettingsOnLaunch", 1) != 0;
-    settings.exclusive_gallery = read_number(key.value, L"ExclusiveGallery", 0) != 0;
     return settings;
 }
 
@@ -113,14 +121,19 @@ void save_settings(const Settings &settings, const wchar_t *key_path)
     write_text(key.value, L"BackgroundImage", settings.background_path);
     write_text(key.value, L"TimeZone", settings.time_zone);
     write_text(key.value, L"Label", settings.label);
+    write_text(key.value, L"NetatmoModule", settings.netatmo_module_id);
     write_number(key.value, L"Theme", static_cast<DWORD>(settings.theme));
     write_number(key.value, L"FontSize", static_cast<DWORD>(settings.font_size));
     write_number(key.value, L"AnalogFontSize", static_cast<DWORD>(settings.analog_font_size));
+    write_number(key.value, L"AnalogFace", static_cast<DWORD>(settings.analog_face));
+    write_number(key.value, L"ReadingFontSize", static_cast<DWORD>(settings.reading_font_size));
     write_number(key.value, L"FontStyle", static_cast<DWORD>(settings.font_style));
     write_number(key.value, L"Layout", static_cast<DWORD>(settings.layout));
     write_number(key.value, L"DateFormat", static_cast<DWORD>(settings.date_format));
     write_number(key.value, L"Interval", static_cast<DWORD>(settings.interval_seconds));
     write_number(key.value, L"CodexRefreshSeconds", static_cast<DWORD>(settings.codex_refresh_seconds));
+    write_number(key.value, L"NetatmoRefreshSeconds", static_cast<DWORD>(settings.netatmo_refresh_seconds));
+    write_number(key.value, L"NetatmoReadings", static_cast<DWORD>(settings.netatmo_readings));
     write_number(key.value, L"Brightness", static_cast<DWORD>(settings.hub_brightness));
     write_number(key.value, L"VerticalOffset", static_cast<DWORD>(settings.vertical_offset));
     write_number(key.value, L"BackgroundFit", static_cast<DWORD>(settings.background_fit));
@@ -133,9 +146,9 @@ void save_settings(const Settings &settings, const wchar_t *key_path)
     write_number(key.value, L"ShowDate", settings.show_date ? 1 : 0);
     write_number(key.value, L"ShowWeekday", settings.show_weekday ? 1 : 0);
     write_number(key.value, L"ShowCodexUsage", settings.show_codex_usage ? 1 : 0);
+    write_number(key.value, L"ShowNetatmo", settings.show_netatmo ? 1 : 0);
     write_number(key.value, L"PauseOnBattery", settings.pause_on_battery ? 1 : 0);
     write_number(key.value, L"ShowSettingsOnLaunch", settings.show_settings_on_launch ? 1 : 0);
-    write_number(key.value, L"ExclusiveGallery", settings.exclusive_gallery ? 1 : 0);
 }
 
 bool starts_with_windows(const wchar_t *value_name)

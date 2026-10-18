@@ -10,6 +10,9 @@ struct Preview
     ClockRenderer renderer;
     Settings settings;
     bool configured = false;
+    ULONGLONG snapshot_ticks = 0;
+    CodexUsage snapshot_usage;
+    NetatmoData snapshot_weather;
 };
 
 void write_error(wchar_t *error, int capacity, const std::exception &exception)
@@ -51,9 +54,10 @@ extern "C" __declspec(dllexport) int clock_settings_load(SettingsWire *wire, wch
     }
 }
 
-extern "C" __declspec(dllexport) int clock_preview_render(Preview *preview, const SettingsWire *wire,
-                                                          BYTE *bytes, int capacity, wchar_t *error,
-                                                          int error_capacity)
+namespace
+{
+int render_preview(Preview *preview, const SettingsWire *wire, ULONGLONG frame_utc_ticks, BYTE *bytes,
+                   int capacity, wchar_t *error, int error_capacity)
 {
     try
     {
@@ -65,9 +69,21 @@ extern "C" __declspec(dllexport) int clock_preview_render(Preview *preview, cons
             preview->configured = true;
         }
         SYSTEMTIME utc = {};
-        GetSystemTime(&utc);
+        if (frame_utc_ticks == 0)
+            GetSystemTime(&utc);
+        else
+            utc = utc_from_ticks(frame_utc_ticks);
         const SYSTEMTIME time = preview->renderer.time_at(utc);
-        auto bitmap = preview->renderer.render(time, load_codex_usage());
+        if ((frame_utc_ticks != 0) && (preview->snapshot_ticks != frame_utc_ticks))
+        {
+            preview->snapshot_usage = load_codex_usage();
+            preview->snapshot_weather = load_netatmo_data();
+            preview->snapshot_ticks = frame_utc_ticks;
+        }
+        auto bitmap =
+            frame_utc_ticks == 0
+                ? preview->renderer.render(time, load_codex_usage(), load_netatmo_data())
+                : preview->renderer.render(time, preview->snapshot_usage, preview->snapshot_weather);
         const auto image = preview->renderer.encode(*bitmap);
         if (image.size() > static_cast<size_t>(capacity))
             throw std::runtime_error("Clock preview exceeds the image buffer");
@@ -77,6 +93,71 @@ extern "C" __declspec(dllexport) int clock_preview_render(Preview *preview, cons
     catch (const std::exception &exception)
     {
         write_error(error, error_capacity, exception);
+        return 0;
+    }
+}
+} // namespace
+
+extern "C" __declspec(dllexport) int clock_preview_render(Preview *preview, const SettingsWire *wire,
+                                                          BYTE *bytes, int capacity, wchar_t *error,
+                                                          int error_capacity)
+{
+    return render_preview(preview, wire, 0, bytes, capacity, error, error_capacity);
+}
+
+extern "C" __declspec(dllexport) int clock_preview_render_at(Preview *preview, const SettingsWire *wire,
+                                                             ULONGLONG frame_utc_ticks, BYTE *bytes,
+                                                             int capacity, wchar_t *error, int error_capacity)
+{
+    return render_preview(preview, wire, frame_utc_ticks, bytes, capacity, error, error_capacity);
+}
+
+extern "C" __declspec(dllexport) int clock_netatmo_import(const wchar_t *path, wchar_t *error, int capacity)
+{
+    try
+    {
+        import_netatmo_credentials(path);
+        return 1;
+    }
+    catch (const std::exception &exception)
+    {
+        write_error(error, capacity, exception);
+        return 0;
+    }
+}
+
+extern "C" __declspec(dllexport) int clock_netatmo_modules(wchar_t *result, int capacity)
+{
+    try
+    {
+        const auto options = netatmo_module_options(load_netatmo_data());
+        if ((result == nullptr) || (capacity <= 0) || (options.size() >= static_cast<size_t>(capacity)))
+            return 0;
+        wcscpy_s(result, static_cast<size_t>(capacity), options.c_str());
+        return 1;
+    }
+    catch (const std::exception &)
+    {
+        return 0;
+    }
+}
+
+extern "C" __declspec(dllexport) int clock_netatmo_diagnostics(const SettingsWire *wire, wchar_t *result,
+                                                               int capacity)
+{
+    try
+    {
+        SYSTEMTIME now = {};
+        GetSystemTime(&now);
+        const auto diagnostics =
+            netatmo_diagnostics(load_netatmo_data(), settings_from_wire(*wire), utc_ticks(now));
+        if ((result == nullptr) || (capacity <= 0) || (diagnostics.size() >= static_cast<size_t>(capacity)))
+            return 0;
+        wcscpy_s(result, static_cast<size_t>(capacity), diagnostics.c_str());
+        return 1;
+    }
+    catch (const std::exception &)
+    {
         return 0;
     }
 }

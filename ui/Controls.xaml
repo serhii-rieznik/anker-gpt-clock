@@ -48,12 +48,13 @@
     <Setter Property="Padding" Value="16,10" />
     <Setter Property="FontSize" Value="13" />
     <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Button">
           <Border x:Name="Surface" CornerRadius="8" Background="{TemplateBinding Background}"
                   BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
           </Border>
           <ControlTemplate.Triggers>
             <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.8" /></Trigger>
@@ -188,7 +189,8 @@
               </ToggleButton.Template>
             </ToggleButton>
             <ContentPresenter Margin="12,8,34,8" VerticalAlignment="Center" IsHitTestVisible="False"
-                              Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
+                              Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}" />
             <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True" IsOpen="{TemplateBinding IsDropDownOpen}" Focusable="False">
               <Border Margin="0,4,0,0" Padding="4" CornerRadius="9" Background="#242A36" BorderBrush="{StaticResource Edge}" BorderThickness="1"
                       MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">

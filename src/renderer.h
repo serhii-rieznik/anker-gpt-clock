@@ -1,6 +1,7 @@
 #pragma once
 #include "settings.h"
 #include "codex_usage.h"
+#include "netatmo.h"
 #include <objidl.h>
 #include <gdiplus.h>
 #include <wincodec.h>
@@ -46,16 +47,21 @@ class ClockRenderer
     SYSTEMTIME time_at(const SYSTEMTIME &utc_time) const;
     std::unique_ptr<Gdiplus::Bitmap> render(const SYSTEMTIME &time) const;
     std::unique_ptr<Gdiplus::Bitmap> render(const SYSTEMTIME &time, const CodexUsage &usage) const;
-    std::unique_ptr<Gdiplus::Bitmap> render_locked(const SYSTEMTIME &locked_at, ULONGLONG elapsed_minutes,
+    std::unique_ptr<Gdiplus::Bitmap> render(const SYSTEMTIME &time, const CodexUsage &usage,
+                                            const NetatmoData &weather) const;
+    std::unique_ptr<Gdiplus::Bitmap> render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
                                                    bool lock_time_known) const;
-    std::unique_ptr<Gdiplus::Bitmap> render_locked(const SYSTEMTIME &locked_at, ULONGLONG elapsed_minutes,
+    std::unique_ptr<Gdiplus::Bitmap> render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
                                                    bool lock_time_known, const CodexUsage &usage) const;
+    std::unique_ptr<Gdiplus::Bitmap> render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
+                                                   bool lock_time_known, const CodexUsage &usage,
+                                                   const NetatmoData &weather) const;
     std::vector<BYTE> encode(Gdiplus::Bitmap &image) const;
 
   private:
     std::unique_ptr<Gdiplus::Bitmap> render_frame(const SYSTEMTIME &time, bool locked,
                                                   ULONGLONG elapsed_minutes, bool lock_time_known,
-                                                  const CodexUsage &usage) const;
+                                                  const CodexUsage &usage, const NetatmoData &weather) const;
     Settings _settings;
     std::unique_ptr<Gdiplus::Bitmap> _background;
     Microsoft::WRL::ComPtr<IWICImagingFactory> _jpeg_factory;

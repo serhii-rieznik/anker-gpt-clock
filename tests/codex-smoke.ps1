@@ -46,7 +46,7 @@ $engine=$null
 try {
     $before=Probe
     $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath)
-    foreach($name in @('Layout','Interval','ShowCodexUsage','CodexRefreshSeconds','PauseOnBattery','ExclusiveGallery')){
+    foreach($name in @('Layout','Interval','ShowCodexUsage','CodexRefreshSeconds','PauseOnBattery')){
         $value=switch($name){'Layout'{if($Locked){0}else{2}} 'Interval'{10} 'ShowCodexUsage'{1} 'CodexRefreshSeconds'{60} default{0}}
         $key.SetValue($name,$value,[Microsoft.Win32.RegistryValueKind]::DWord)
     }
@@ -113,8 +113,7 @@ try {
     Wait-For {[CodexClockSmoke]::Status() -eq 'Updates paused'} 'Clock did not pause'
     Wait-For {@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($engine.Id) AND Name='codex.exe'").Count -eq 0} 'Codex helper stayed resident'
     $after=Probe
-    $protected=$before.galleryBitmap -band (-bnot (1 -shl $before.selectedSlot))
-    Assert ($before.galleryCount -eq $after.galleryCount -and ($after.galleryBitmap -band $protected) -eq $protected) 'Unrelated gallery images changed'
+    Assert ($after.galleryCount -eq 1) 'Old images accumulated in the clock gallery'
     & (Join-Path (Split-Path $Exe) 'AnkerClockTests.exe') --capture-current $outputDir | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'Physical image readback failed'
     Copy-Item "$outputDir\physical-app-clock.jpg" "$outputDir\$resultPrefix-physical-clock.jpg" -Force

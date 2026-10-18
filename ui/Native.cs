@@ -9,6 +9,9 @@ namespace AnkerClock
         public int Version, Theme, FontSize, FontStyle, Layout, DateFormat, Interval, Brightness,
             VerticalOffset, BackgroundFit, TextColor, AccentColor, ImageDim, Flags, StartWindows, AnalogFontSize;
         public int CodexRefreshSeconds, BackgroundDither;
+        public int NetatmoRefreshSeconds, NetatmoReadings;
+        public int AnalogFace, ReadingFontSize;
+        public string NetatmoModule;
         public string Font;
         public string BackgroundPath;
         public string TimeZone;
@@ -18,6 +21,8 @@ namespace AnkerClock
     internal static class Native
     {
         internal const uint Query = 0x8004, Register = 0x8005;
+        internal const uint NetatmoRefresh = 0x8006;
+        internal const int Shutdown = 0x8007;
         [StructLayout(LayoutKind.Sequential)]
         private struct CopyData { public IntPtr Kind; public int Size; public IntPtr Data; }
 
@@ -26,9 +31,18 @@ namespace AnkerClock
         [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void clock_preview_close(IntPtr preview);
         [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        internal static extern int clock_netatmo_import(string path, StringBuilder error, int capacity);
+        [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        internal static extern int clock_netatmo_modules(StringBuilder result, int capacity);
+        [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int clock_netatmo_diagnostics(IntPtr settings, StringBuilder result, int capacity);
+        [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern int clock_settings_load(IntPtr settings, StringBuilder error, int capacity);
         [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern int clock_preview_render(IntPtr preview, IntPtr settings,
+            [Out] byte[] bytes, int capacity, StringBuilder error, int errorCapacity);
+        [DllImport("AnkerClock.Native.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int clock_preview_render_at(IntPtr preview, IntPtr settings, long frameUtcTicks,
             [Out] byte[] bytes, int capacity, StringBuilder error, int errorCapacity);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindow(string className, string title);
@@ -50,8 +64,8 @@ namespace AnkerClock
             return text.ToString();
         }
 
-        // 16 Int32 fields, fixed UTF-16 buffers, then the usage interval and dithering strength.
-        private const int WireSize = 66204;
+        // Matches SettingsWire's fixed UTF-16 layout.
+        private const int WireSize = 66476;
         internal static int clock_settings_load(out SettingsWire settings, StringBuilder error, int capacity)
         {
             IntPtr buffer = Marshal.AllocHGlobal(WireSize);
@@ -71,6 +85,29 @@ namespace AnkerClock
             {
                 WriteSettings(settings, buffer);
                 return clock_preview_render(preview, buffer, bytes, capacity, error, errorCapacity);
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        internal static int RenderFontPreview(IntPtr preview, ref SettingsWire settings, long frameUtcTicks,
+            byte[] bytes, StringBuilder error)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(WireSize);
+            try
+            {
+                WriteSettings(settings, buffer);
+                return clock_preview_render_at(preview, buffer, frameUtcTicks, bytes, bytes.Length, error, error.Capacity);
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        internal static string NetatmoDiagnostics(SettingsWire settings)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(WireSize);
+            try
+            {
+                WriteSettings(settings, buffer);
+                var result = new StringBuilder(4096);
+                return clock_netatmo_diagnostics(buffer, result, result.Capacity) == 0 ?
+                    "Weather status unavailable.\nCould not read the saved weather cache. Try refreshing readings." : result.ToString();
             }
             finally { Marshal.FreeHGlobal(buffer); }
         }
@@ -98,6 +135,11 @@ namespace AnkerClock
                 AnalogFontSize = n[15],
                 CodexRefreshSeconds = Marshal.ReadInt32(buffer, 66196),
                 BackgroundDither = Marshal.ReadInt32(buffer, 66200),
+                NetatmoRefreshSeconds = Marshal.ReadInt32(buffer, 66204),
+                NetatmoReadings = Marshal.ReadInt32(buffer, 66208),
+                NetatmoModule = Marshal.PtrToStringUni(IntPtr.Add(buffer, 66212)),
+                AnalogFace = Marshal.ReadInt32(buffer, 66468),
+                ReadingFontSize = Marshal.ReadInt32(buffer, 66472),
                 Font = Marshal.PtrToStringUni(IntPtr.Add(buffer, 64)),
                 BackgroundPath = Marshal.PtrToStringUni(IntPtr.Add(buffer, 320)),
                 TimeZone = Marshal.PtrToStringUni(IntPtr.Add(buffer, 65856)),
@@ -117,6 +159,11 @@ namespace AnkerClock
             WriteText(s.Label, buffer, 66112, 41);
             Marshal.WriteInt32(buffer, 66196, s.CodexRefreshSeconds);
             Marshal.WriteInt32(buffer, 66200, s.BackgroundDither);
+            Marshal.WriteInt32(buffer, 66204, s.NetatmoRefreshSeconds);
+            Marshal.WriteInt32(buffer, 66208, s.NetatmoReadings);
+            WriteText(s.NetatmoModule, buffer, 66212, 128);
+            Marshal.WriteInt32(buffer, 66468, s.AnalogFace);
+            Marshal.WriteInt32(buffer, 66472, s.ReadingFontSize);
         }
         private static void WriteText(string text, IntPtr buffer, int offset, int capacity)
         {

@@ -245,7 +245,7 @@ std::array<BYTE, 5> HubConnection::current_image()
     return result;
 }
 
-void HubConnection::initialize(bool exclusive_gallery)
+void HubConnection::initialize()
 {
     const BYTE carousel[] = {2, 27, 0};
     write(carousel, sizeof(carousel));
@@ -256,11 +256,11 @@ void HubConnection::initialize(bool exclusive_gallery)
     const BYTE screensaver[] = {2, 31, 1};
     write(screensaver, sizeof(screensaver));
     pause(20);
-    const bool recovered = recover_pending_frame();
+    recover_pending_frame();
     const auto existing = gallery();
     if (existing[3] > 8)
         throw std::runtime_error("The hub returned an invalid gallery count");
-    if ((existing[3] > 1) && exclusive_gallery)
+    if (existing[3] > 1)
     {
         const BYTE clear[] = {2, 41};
         bool erased = false;
@@ -283,16 +283,14 @@ void HubConnection::initialize(bool exclusive_gallery)
         if (gallery()[3] != 0)
             throw std::runtime_error("The hub's image storage was not cleared");
         _has_current_image = false;
-        _gallery_count = 1;
-        clear_pending_frame();
     }
-    else if (recovered == false)
+    else
     {
         _has_current_image = existing[3] > 0;
-        _gallery_count = std::max(1, static_cast<int>(existing[3]));
         if (_has_current_image)
             _current_crc = read_be16(current_image().data() + 3);
     }
+    clear_pending_frame();
 }
 
 bool HubConnection::select_image(uint16_t crc)
@@ -332,7 +330,7 @@ void HubConnection::save_pending_frame(uint16_t crc)
                            static_cast<BYTE>(crc),
                            static_cast<BYTE>(_current_crc >> 8),
                            static_cast<BYTE>(_current_crc),
-                           static_cast<BYTE>(_gallery_count)};
+                           1};
     HKEY key = nullptr;
     LSTATUS status = RegCreateKeyExW(HKEY_CURRENT_USER, transfer_key, 0, nullptr, 0, KEY_SET_VALUE, nullptr,
                                      &key, nullptr);
@@ -358,40 +356,35 @@ void HubConnection::clear_pending_frame()
         throw std::runtime_error("Could not complete the clock update record");
 }
 
-bool HubConnection::recover_pending_frame()
+void HubConnection::recover_pending_frame()
 {
     BYTE record[9] = {};
     DWORD bytes = sizeof(record);
     const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, transfer_key, transfer_value, RRF_RT_REG_BINARY,
                                         nullptr, record, &bytes);
     if (status == ERROR_FILE_NOT_FOUND)
-        return false;
+        return;
     if ((status != ERROR_SUCCESS) || (bytes != sizeof(record)) || (record[0] != 'A') || (record[1] != 'C') ||
         (record[2] != 1) || (record[3] > 1) || (record[8] == 0) || (record[8] > 8))
         throw std::runtime_error("The pending clock update record is invalid");
     const uint16_t pending_crc = read_be16(record + 4);
     const uint16_t previous_crc = read_be16(record + 6);
-    _gallery_count = record[8];
     if (select_image(pending_crc))
     {
         _current_crc = pending_crc;
         _has_current_image = true;
         if (record[3] != 0)
             delete_image(previous_crc);
-        if (gallery()[3] != _gallery_count)
-            throw std::runtime_error("The hub could not finish its interrupted clock update");
-        clear_pending_frame();
+        const int count = gallery()[3];
+        if ((count < 1) || (count > 8))
+            throw std::runtime_error("The hub returned an invalid gallery count during recovery");
     }
     else
     {
         _has_current_image = (record[3] != 0) && select_image(previous_crc);
         _current_crc = previous_crc;
         delete_image(pending_crc);
-        if (_has_current_image)
-            clear_pending_frame();
-        // Keep the record when a full gallery lost its replaced slot, so retry fills that slot.
     }
-    return true;
 }
 
 void HubConnection::delete_image(uint16_t crc)
@@ -448,8 +441,6 @@ FrameResult HubConnection::replace_image(std::vector<BYTE> image, ULONGLONG sele
     header[30] = static_cast<BYTE>(crc >> 8);
     header[31] = static_cast<BYTE>(crc);
     save_pending_frame(crc);
-    if ((_gallery_count == 8) && _has_current_image)
-        delete_image(_current_crc);
     pause(300);
     BYTE ready[3] = {};
     for (int attempt = 0; attempt < 3; ++attempt)
@@ -490,7 +481,7 @@ FrameResult HubConnection::replace_image(std::vector<BYTE> image, ULONGLONG sele
     _has_current_image = true;
     if (had_previous)
         delete_image(previous);
-    if (gallery()[3] != _gallery_count)
+    if (gallery()[3] != 1)
         throw std::runtime_error("The hub's clock image storage is inconsistent");
     clear_pending_frame();
     ULARGE_INTEGER selected;

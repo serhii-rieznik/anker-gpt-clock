@@ -14,6 +14,17 @@ Color text_color(COLORREF value, BYTE alpha)
     return Color(alpha, GetRValue(value), GetGValue(value), GetBValue(value));
 }
 
+COLORREF metric_color(int reading, double value, COLORREF normal)
+{
+    if (reading == 2)
+        return value < 1000 ? RGB(138, 172, 155) : (value < 2000 ? RGB(186, 164, 111) : RGB(186, 130, 132));
+    if (reading == 3)
+        return value < 55 ? RGB(138, 172, 155) : (value < 85 ? RGB(186, 164, 111) : RGB(186, 130, 132));
+    if (reading == 4)
+        return value >= 50 ? RGB(138, 172, 155) : (value >= 20 ? RGB(186, 164, 111) : RGB(186, 130, 132));
+    return RGB((GetRValue(normal) * 4) / 5, (GetGValue(normal) * 4) / 5, (GetBValue(normal) * 4) / 5);
+}
+
 void require_jpeg(HRESULT status)
 {
     if (FAILED(status))
@@ -30,6 +41,185 @@ void draw_centered(Graphics &graphics, const std::wstring &text, const wchar_t *
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     graphics.DrawString(text.c_str(), -1, &font, RectF(10, y, 300, height), &format, &brush);
+}
+
+void rounded_path(GraphicsPath &path, const RectF &box, float radius)
+{
+    const float diameter = radius * 2;
+    path.AddArc(box.X, box.Y, diameter, diameter, 180, 90);
+    path.AddArc(box.GetRight() - diameter, box.Y, diameter, diameter, 270, 90);
+    path.AddArc(box.GetRight() - diameter, box.GetBottom() - diameter, diameter, diameter, 0, 90);
+    path.AddArc(box.X, box.GetBottom() - diameter, diameter, diameter, 90, 90);
+    path.CloseFigure();
+}
+
+void draw_reading_icon(Graphics &graphics, int reading, float x, float y, COLORREF color)
+{
+    const GraphicsState saved = graphics.Save();
+    graphics.TranslateTransform(x, y);
+    graphics.ScaleTransform(0.86f, 0.86f);
+    Pen pen(text_color(color, 255), 1.8f);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
+    pen.SetLineJoin(LineJoinRound);
+    SolidBrush fill(text_color(color, 255));
+    GraphicsPath path;
+    if (reading == 0)
+    {
+        path.AddLine(4.5f, 19.0f, 4.5f, 4.0f);
+        path.AddArc(4.5f, 0.5f, 7.0f, 7.0f, 180.0f, 180.0f);
+        path.AddLine(11.5f, 4.0f, 11.5f, 19.0f);
+        path.AddBezier(11.5f, 19.0f, 17.0f, 23.5f, 13.5f, 30.0f, 8.0f, 30.0f);
+        path.AddBezier(8.0f, 30.0f, 2.5f, 30.0f, -1.0f, 23.5f, 4.5f, 19.0f);
+        graphics.DrawPath(&pen, &path);
+        graphics.DrawLine(&pen, 8.0f, 9.0f, 8.0f, 23.0f);
+        graphics.FillEllipse(&fill, 5.7f, 22.7f, 4.6f, 4.6f);
+    }
+    else if (reading == 1)
+    {
+        path.AddBezier(8, 1, 6, 8, 0, 15, 0, 21);
+        path.AddBezier(0, 21, 0, 32, 16, 32, 16, 21);
+        path.AddBezier(16, 21, 16, 15, 10, 8, 8, 1);
+        graphics.DrawPath(&pen, &path);
+    }
+    else if (reading == 2)
+    {
+        graphics.DrawLine(&pen, 8.0f, 7.5f, 8.0f, 11.5f);
+        graphics.DrawLine(&pen, 8.0f, 19.0f, 8.0f, 23.0f);
+        graphics.DrawEllipse(&pen, 4.5f, 0.5f, 7.0f, 7.0f);
+        graphics.DrawEllipse(&pen, 3.5f, 10.5f, 9.0f, 9.0f);
+        graphics.DrawEllipse(&pen, 4.5f, 23.5f, 7.0f, 7.0f);
+    }
+    else if (reading == 3)
+    {
+        const float heights[] = {8, 19, 28, 19, 8};
+        for (int index = 0; index < 5; ++index)
+            graphics.DrawLine(&pen, 1 + (index * 3.5f), 14 - (heights[index] * 0.5f), 1 + (index * 3.5f),
+                              14 + (heights[index] * 0.5f));
+    }
+    else if (reading == 4)
+    {
+        rounded_path(path, RectF(0, 1, 16, 28), 3);
+        graphics.DrawPath(&pen, &path);
+        graphics.DrawLine(&pen, 4.0f, 9.0f, 8.0f, 13.0f);
+        graphics.DrawLine(&pen, 8.0f, 13.0f, 4.0f, 17.0f);
+        graphics.DrawLine(&pen, 8.0f, 21.0f, 12.0f, 21.0f);
+    }
+    graphics.Restore(saved);
+}
+
+void draw_reading(Graphics &graphics, int reading, const std::wstring &value, const wchar_t *unit, float top,
+                  float size, COLORREF color, bool stale)
+{
+    GraphicsPath cell;
+    rounded_path(cell, RectF(187, top, 130, 50), 8);
+    SolidBrush background(Color(255, 16, 19, 17));
+    graphics.FillPath(&background, &cell);
+    if (reading >= 0)
+        draw_reading_icon(graphics, reading, 194, top + 12, color);
+    if (stale)
+    {
+        constexpr float x = 208;
+        const float y = top + 37;
+        graphics.FillEllipse(&background, x - 7, y - 7, 14.0f, 14.0f);
+        Pen badge(Color(255, 186, 164, 111), 1.4f);
+        badge.SetStartCap(LineCapRound);
+        badge.SetEndCap(LineCapRound);
+        graphics.DrawEllipse(&badge, x - 5, y - 5, 10.0f, 10.0f);
+        graphics.DrawLine(&badge, x, y - 3, x, y);
+        graphics.DrawLine(&badge, x, y, x + 2.5f, y + 1.5f);
+    }
+    StringFormat format(StringFormat::GenericTypographic());
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+    FontFamily family(L"Segoe UI");
+    const float unit_size = reading == 0 ? 20.0f : 18.0f;
+    Font unit_font(&family, unit_size, FontStyleRegular, UnitPixel);
+    RectF unit_bounds;
+    if (unit[0] != L'\0')
+        graphics.MeasureString(unit, -1, &unit_font, PointF(0, 0), &format, &unit_bounds);
+    const float gap = reading == 0 ? 0.0f : 3.0f;
+    RectF bounds;
+    for (;;)
+    {
+        Font font(&family, size, FontStyleRegular, UnitPixel);
+        graphics.MeasureString(value.c_str(), -1, &font, PointF(0, 0), &format, &bounds);
+        if (((bounds.Width + gap + unit_bounds.Width) <= 97) || (size <= 24))
+            break;
+        size -= 1;
+    }
+    const float ascent =
+        static_cast<float>(family.GetCellAscent(FontStyleRegular)) / family.GetEmHeight(FontStyleRegular);
+    const float baseline = top + 25 + (size * 0.34f);
+    Font font(&family, size, FontStyleRegular, UnitPixel);
+    SolidBrush ink(text_color(color, 255));
+    graphics.DrawString(value.c_str(), -1, &font, PointF(217, baseline - (ascent * size)), &format, &ink);
+    const float unit_baseline = reading == 0 ? baseline - (size * 0.38f) : baseline;
+    if (unit[0] != L'\0')
+        graphics.DrawString(unit, -1, &unit_font,
+                            PointF(217 + bounds.Width + gap, unit_baseline - (ascent * unit_size)), &format,
+                            &ink);
+}
+
+void draw_analog_date(Graphics &graphics, const SYSTEMTIME &time, const Settings &settings, float x, float y)
+{
+    constexpr const wchar_t *months[] = {L"JAN", L"FEB", L"MAR", L"APR", L"MAY", L"JUN",
+                                         L"JUL", L"AUG", L"SEP", L"OCT", L"NOV", L"DEC"};
+    const std::wstring day = std::to_wstring(time.wDay);
+    StringFormat format(StringFormat::GenericTypographic());
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    float size = 22;
+    for (;;)
+    {
+        Font font(settings.font.c_str(), size, settings.font_style, UnitPixel);
+        RectF bounds;
+        graphics.MeasureString(day.c_str(), -1, &font, PointF(0, 0), &format, &bounds);
+        if ((bounds.Width <= 40) || (size <= 18))
+        {
+            SolidBrush ink(text_color(settings.text_color, 230));
+            graphics.DrawString(day.c_str(), -1, &font, RectF(x - 22, y - 26, 44, 29), &format, &ink);
+            break;
+        }
+        size -= 1;
+    }
+    Font month(L"Segoe UI", 18, FontStyleRegular, UnitPixel);
+    SolidBrush ink(text_color(settings.text_color, 180));
+    graphics.DrawString(months[time.wMonth - 1], -1, &month, RectF(x - 22, y + 1, 44, 25), &format, &ink);
+}
+
+void draw_lock_overlay(Graphics &graphics, float width, float duration_width, ULONGLONG elapsed_minutes,
+                       bool lock_time_known, COLORREF color)
+{
+    StringFormat format(StringFormat::GenericTypographic());
+    format.SetFormatFlags(StringFormatFlagsNoWrap);
+    Font heading(L"Segoe UI", 20, FontStyleRegular, UnitPixel);
+    RectF bounds;
+    graphics.MeasureString(L"locked", -1, &heading, PointF(0, 0), &format, &bounds);
+    const float left = (width - bounds.Width - 23) * 0.5f;
+    Pen outline(text_color(color, 210), 1.6f);
+    outline.SetLineJoin(LineJoinRound);
+    graphics.DrawArc(&outline, left + 3, 5.0f, 8.0f, 10.0f, 180.0f, 180.0f);
+    graphics.DrawRectangle(&outline, left, 10.0f, 14.0f, 11.0f);
+    SolidBrush ink(text_color(color, 210));
+    graphics.FillEllipse(&ink, left + 6, 14.0f, 2.0f, 2.0f);
+    format.SetLineAlignment(StringAlignmentCenter);
+    graphics.DrawString(L"locked", -1, &heading, RectF(left + 23, 0, bounds.Width + 2, 29), &format, &ink);
+    const std::wstring duration = (lock_time_known ? L"" : L"≥ ") + format_locked_duration(elapsed_minutes);
+    float size = 18;
+    for (;;)
+    {
+        Font font(L"Segoe UI", size, FontStyleRegular, UnitPixel);
+        graphics.MeasureString(duration.c_str(), -1, &font, PointF(0, 0), &format, &bounds);
+        if ((bounds.Width <= (duration_width - 8)) || (size <= 16))
+        {
+            format.SetAlignment(StringAlignmentCenter);
+            graphics.DrawString(duration.c_str(), -1, &font, RectF(4, 214, duration_width - 8, 26), &format,
+                                &ink);
+            break;
+        }
+        size -= 1;
+    }
 }
 
 void dither_background(Bitmap &bitmap, int strength)
@@ -95,6 +285,9 @@ std::unique_ptr<Bitmap> build_background(const Settings &settings)
         if ((source.GetLastStatus() != Ok) || (source.GetWidth() == 0) || (source.GetHeight() == 0))
             throw std::runtime_error("Could not open the background image. Choose a JPEG, PNG, or BMP file.");
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+        ImageAttributes edges;
+        edges.SetWrapMode(WrapModeTileFlipXY);
         graphics.Clear(Color(255, 9, 12, 19));
         if (settings.background_fit == 0)
         {
@@ -102,16 +295,19 @@ std::unique_ptr<Bitmap> build_background(const Settings &settings)
             const float width = 320.0f / scale;
             const float height = 240.0f / scale;
             graphics.DrawImage(&source, RectF(0, 0, 320, 240), (source.GetWidth() - width) * 0.5f,
-                               (source.GetHeight() - height) * 0.5f, width, height, UnitPixel);
+                               (source.GetHeight() - height) * 0.5f, width, height, UnitPixel, &edges);
         }
         else
         {
             const float scale = std::min(320.0f / source.GetWidth(), 240.0f / source.GetHeight());
             const float width = source.GetWidth() * scale;
             const float height = source.GetHeight() * scale;
-            graphics.DrawImage(&source, RectF((320 - width) * 0.5f, (240 - height) * 0.5f, width, height));
+            graphics.DrawImage(&source, RectF((320 - width) * 0.5f, (240 - height) * 0.5f, width, height), 0,
+                               0, static_cast<float>(source.GetWidth()),
+                               static_cast<float>(source.GetHeight()), UnitPixel, &edges);
         }
         SolidBrush dim(Color(static_cast<BYTE>((settings.image_dim * 255) / 100), 0, 0, 0));
+        graphics.SetSmoothingMode(SmoothingModeNone);
         graphics.FillRectangle(&dim, 0, 0, 320, 240);
         return bitmap;
     }
@@ -307,24 +503,37 @@ std::unique_ptr<Bitmap> ClockRenderer::render(const SYSTEMTIME &time) const
 
 std::unique_ptr<Bitmap> ClockRenderer::render(const SYSTEMTIME &time, const CodexUsage &usage) const
 {
-    return render_frame(time, false, 0, false, usage);
+    return render(time, usage, NetatmoData{});
 }
 
-std::unique_ptr<Bitmap> ClockRenderer::render_locked(const SYSTEMTIME &locked_at, ULONGLONG elapsed_minutes,
+std::unique_ptr<Bitmap> ClockRenderer::render(const SYSTEMTIME &time, const CodexUsage &usage,
+                                              const NetatmoData &weather) const
+{
+    return render_frame(time, false, 0, false, usage, weather);
+}
+
+std::unique_ptr<Bitmap> ClockRenderer::render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
                                                      bool lock_time_known) const
 {
-    return render_locked(locked_at, elapsed_minutes, lock_time_known, CodexUsage{});
+    return render_locked(time, elapsed_minutes, lock_time_known, CodexUsage{});
 }
 
-std::unique_ptr<Bitmap> ClockRenderer::render_locked(const SYSTEMTIME &locked_at, ULONGLONG elapsed_minutes,
+std::unique_ptr<Bitmap> ClockRenderer::render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
                                                      bool lock_time_known, const CodexUsage &usage) const
 {
-    return render_frame(locked_at, true, elapsed_minutes, lock_time_known, usage);
+    return render_locked(time, elapsed_minutes, lock_time_known, usage, NetatmoData{});
+}
+
+std::unique_ptr<Bitmap> ClockRenderer::render_locked(const SYSTEMTIME &time, ULONGLONG elapsed_minutes,
+                                                     bool lock_time_known, const CodexUsage &usage,
+                                                     const NetatmoData &weather) const
+{
+    return render_frame(time, true, elapsed_minutes, lock_time_known, usage, weather);
 }
 
 std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool locked,
                                                     ULONGLONG elapsed_minutes, bool lock_time_known,
-                                                    const CodexUsage &usage) const
+                                                    const CodexUsage &usage, const NetatmoData &weather) const
 {
     if (_background == nullptr)
         throw std::runtime_error("Clock renderer has no background");
@@ -351,64 +560,28 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
     };
     const ClockText text = format_clock(time, _settings);
     const COLORREF color = _settings.text_color;
-    if (locked)
-    {
-        Pen outline(text_color(_settings.accent_color, 200), 1.4f);
-        graphics.DrawArc(&outline, 153.0f, 20.0f, 14.0f, 20.0f, 180.0f, 180.0f);
-        graphics.DrawRectangle(&outline, 150.0f, 30.0f, 20.0f, 17.0f);
-        SolidBrush key(text_color(_settings.accent_color, 220));
-        graphics.FillEllipse(&key, 158.5f, 36.0f, 3.0f, 3.0f);
-        graphics.FillRectangle(&key, 159.5f, 38.0f, 1.0f, 4.0f);
-        draw_centered(graphics, lock_time_known ? L"LOCKED AT" : L"WINDOWS LOCKED", L"Segoe UI", 10, 55, 18,
-                      color, 150, 0);
-        std::wstring stamp = L"Before app started";
-        if (lock_time_known)
-        {
-            Settings stamp_settings = _settings;
-            stamp_settings.show_seconds = true;
-            const ClockText lock_text = format_clock(time, stamp_settings);
-            stamp = lock_text.time + lock_text.detail;
-        }
-        draw_centered(graphics, stamp, _settings.font.c_str(), lock_time_known ? 24.0f : 18.0f, 76, 34, color,
-                      240, _settings.font_style);
-        SolidBrush accent(text_color(_settings.accent_color, 150));
-        graphics.FillRectangle(&accent, 146, 119, 28, 1);
-        const std::wstring duration = format_locked_duration(elapsed_minutes);
-        float size = static_cast<float>(std::clamp(_settings.font_size, 36, 56));
-        StringFormat format(StringFormat::GenericTypographic());
-        format.SetFormatFlags(StringFormatFlagsNoWrap);
-        for (;;)
-        {
-            Font font(_settings.font.c_str(), size, _settings.font_style, UnitPixel);
-            RectF bounds;
-            graphics.MeasureString(duration.c_str(), -1, &font, PointF(0, 0), &format, &bounds);
-            if (((bounds.Width <= 280) && (bounds.Height <= 64)) || (size <= 16))
-                break;
-            size -= 2;
-        }
-        draw_centered(graphics, duration, _settings.font.c_str(), size, 129, 64, color, 255,
-                      _settings.font_style);
-        if (_settings.show_codex_usage)
-        {
-            SYSTEMTIME now = {};
-            GetSystemTime(&now);
-            const auto allowance = format_codex_usage(usage, utc_ticks(now), _settings.codex_refresh_seconds);
-            if (allowance.remaining_percent >= 0)
-                draw_centered(graphics, allowance.value, _settings.font.c_str(), 28, 199, 36,
-                              _settings.accent_color, 255, _settings.font_style);
-        }
-        else
-        {
-            draw_centered(graphics, lock_time_known ? L"TIME LOCKED" : L"OBSERVED SINCE STARTUP", L"Segoe UI",
-                          10, 195, 18, color, 145, 0);
-            if (lock_time_known)
-                draw_centered(graphics, text.date, L"Segoe UI", 10, 215, 16, color, 120, 0);
-        }
-        return finish();
-    }
     if (_settings.layout == 2)
     {
-        const PointF center(160, 120);
+        const bool show_weather = _settings.show_netatmo;
+        const bool precision = _settings.analog_face == 1;
+        const bool framed = _settings.analog_face == 2;
+        const PointF center(show_weather ? 92.0f : 160.0f, 120);
+        const float outer_width =
+            show_weather ? (framed ? 75.0f : (precision ? 86.0f : 88.0f)) : (framed ? 140.0f : 152.0f);
+        const float outer_height =
+            show_weather ? outer_width : (locked ? (framed ? 75.0f : 88.0f) : (framed ? 100.0f : 112.0f));
+        const float numeral_width = show_weather ? 70.0f : 134.0f;
+        const float numeral_height = (show_weather || locked) ? 70.0f : 94.0f;
+        if (framed)
+        {
+            GraphicsPath border;
+            rounded_path(border,
+                         show_weather ? RectF(6, 34, 172, 172)
+                                      : (locked ? RectF(8, 34, 304, 172) : RectF(8, 8, 304, 224)),
+                         14);
+            Pen outline(text_color(color, 70), 1);
+            graphics.DrawPath(&outline, &border);
+        }
         constexpr float pi = 3.14159265358979323846f;
         // Intersect clock angles with the rectangular face so hands point at their perimeter ticks.
         const auto reach = [](float angle, float half_width, float half_height) {
@@ -417,31 +590,36 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
             return std::min(half_width / std::max(x, 0.0001f), half_height / std::max(y, 0.0001f));
         };
         Pen minute_marks(text_color(color, 105), 0.7f);
-        Pen hour_marks(text_color(color, 245), 1.5f);
+        Pen hour_marks(text_color(color, show_weather ? 210 : 245), precision ? 2.3f : 1.5f);
         minute_marks.SetEndCap(LineCapRound);
         hour_marks.SetEndCap(LineCapRound);
         for (int tick = 0; tick < 60; ++tick)
         {
             const float angle = tick * pi / 30;
             const bool hour = (tick % 5) == 0;
-            const float outer = reach(angle, 152, 112);
-            const float inner = outer - (hour ? 10.0f : 3.5f);
+            if ((precision) && (hour == false))
+                continue;
+            const float outer = reach(angle, outer_width, outer_height);
+            const float inner = outer - (hour ? (precision ? 11.0f : (show_weather ? 8.0f : 10.0f)) : 3.5f);
             graphics.DrawLine(hour ? &hour_marks : &minute_marks, center.X + std::sin(angle) * inner,
                               center.Y - std::cos(angle) * inner, center.X + std::sin(angle) * outer,
                               center.Y - std::cos(angle) * outer);
         }
 
-        Font numerals(_settings.font.c_str(), static_cast<float>(_settings.analog_font_size),
+        Font numerals(_settings.font.c_str(), _settings.analog_font_size * (precision ? 1.25f : 1.0f),
                       _settings.font_style, UnitPixel);
         SolidBrush numeral_color(text_color(color, 230));
         StringFormat numeral_format(StringFormat::GenericTypographic());
         numeral_format.SetAlignment(StringAlignmentCenter);
         numeral_format.SetLineAlignment(StringAlignmentCenter);
         numeral_format.SetFormatFlags(StringFormatFlagsNoWrap);
-        float hand_half_width = 112;
-        float hand_half_height = 78;
-        for (int hour = 1; hour <= 12; ++hour)
+        float hand_half_width = show_weather ? 56.0f : 112.0f;
+        float hand_half_height = (show_weather || locked) ? 56.0f : 78.0f;
+        float date_x = center.X + (outer_width * 0.5f);
+        for (int hour = 1; (framed == false) && (hour <= 12); ++hour)
         {
+            if ((precision) && ((hour % 3) != 0))
+                continue;
             const float angle = hour * pi / 6;
             const std::wstring number = std::to_wstring(hour);
             RectF bounds;
@@ -449,22 +627,25 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
             const float width = bounds.Width + 2;
             const float height = bounds.Height + 2;
             if ((hour == 3) || (hour == 9))
-                hand_half_width = std::min(hand_half_width, 134 - width - 6);
+                hand_half_width = std::min(hand_half_width, numeral_width - width - 6);
             if ((hour == 6) || (hour == 12))
-                hand_half_height = std::min(hand_half_height, 94 - height - 6);
+                hand_half_height = std::min(hand_half_height, numeral_height - height - 6);
+            if (hour == 3)
+                date_x = center.X + ((numeral_width - (width * 0.5f)) * 0.5f);
             // Keep the entire glyph box inside the dial, leaving a clear gap after the hour batons.
-            const float distance = reach(angle, 134 - (width * 0.5f), 94 - (height * 0.5f));
+            const float distance =
+                reach(angle, numeral_width - (width * 0.5f), numeral_height - (height * 0.5f));
             graphics.DrawString(number.c_str(), -1, &numerals,
                                 RectF(center.X + (std::sin(angle) * distance) - (width * 0.5f),
                                       center.Y - (std::cos(angle) * distance) - (height * 0.5f), width,
                                       height),
                                 &numeral_format, &numeral_color);
         }
-        if (_settings.label.empty() == false)
+        if ((locked == false) && (show_weather == false) && (_settings.label.empty() == false))
             draw_centered(graphics, _settings.label, _settings.font.c_str(), 10, 72, 18, color, 145, 0);
-        else if (_settings.show_weekday)
+        else if ((locked == false) && (show_weather == false) && _settings.show_weekday)
             draw_centered(graphics, text.weekday, _settings.font.c_str(), 10, 72, 18, color, 145, 0);
-        if (_settings.show_codex_usage)
+        if (_settings.show_codex_usage && (show_weather == false))
         {
             SYSTEMTIME utc = {};
             GetSystemTime(&utc);
@@ -473,6 +654,8 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
             if (usage_text.remaining_percent >= 0)
             {
                 float size = std::clamp(_settings.analog_font_size * 1.2f, 22.0f, 30.0f);
+                constexpr float usage_width = 80.0f;
+                const float usage_x = _settings.show_date ? 53.0f : 187.0f;
                 StringFormat format(StringFormat::GenericTypographic());
                 format.SetAlignment(StringAlignmentCenter);
                 format.SetLineAlignment(StringAlignmentCenter);
@@ -483,24 +666,26 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
                     RectF bounds;
                     graphics.MeasureString(usage_text.value.c_str(), -1, &font, PointF(0, 0), &format,
                                            &bounds);
-                    if ((bounds.Width <= 80) || (size <= 20))
+                    if ((bounds.Width <= usage_width) || (size <= 20))
                     {
                         SolidBrush ink(text_color(color, 240));
-                        graphics.DrawString(usage_text.value.c_str(), -1, &font, RectF(187, 102, 80, 36),
-                                            &format, &ink);
+                        graphics.DrawString(usage_text.value.c_str(), -1, &font,
+                                            RectF(usage_x, 102, usage_width, 36), &format, &ink);
                         break;
                     }
                     size -= 0.5f;
                 }
                 SolidBrush track(text_color(color, 40));
                 SolidBrush fill(text_color(_settings.accent_color, 190));
-                graphics.FillRectangle(&track, 204, 143, 46, 1);
-                graphics.FillRectangle(&fill, 204.0f, 143.0f, 46 * usage_text.remaining_percent / 100.0f,
-                                       1.0f);
+                const float track_x = usage_x + 17;
+                constexpr float track_width = 46.0f;
+                graphics.FillRectangle(&track, track_x, 143.0f, track_width, 1.0f);
+                graphics.FillRectangle(&fill, track_x, 143.0f,
+                                       track_width * usage_text.remaining_percent / 100.0f, 1.0f);
             }
         }
-        else if (_settings.show_date)
-            draw_centered(graphics, text.date, _settings.font.c_str(), 10, 154, 20, color, 165, 0);
+        if (_settings.show_date)
+            draw_analog_date(graphics, time, _settings, date_x, center.Y);
 
         const auto hand = [&](float angle, float length, float width, float tail, COLORREF hand_color) {
             Pen pen(text_color(hand_color, 240), width);
@@ -523,26 +708,96 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
         const float hour_angle =
             ((time.wHour % 12) + (time.wMinute / 60.0f) + (time.wSecond / 3600.0f)) * pi / 6;
         const float minute_angle = (time.wMinute + (time.wSecond / 60.0f)) * pi / 30;
-        lance(hour_angle, reach(hour_angle, hand_half_width, hand_half_height) * 0.68f, 2.8f, 8);
-        lance(minute_angle, reach(minute_angle, hand_half_width, hand_half_height), 1.7f, 10);
+        if (precision)
+        {
+            hand(hour_angle, reach(hour_angle, hand_half_width, hand_half_height) * 0.68f, 4, 6, color);
+            hand(minute_angle, reach(minute_angle, hand_half_width, hand_half_height), 2.6f, 8, color);
+        }
+        else
+        {
+            lance(hour_angle, reach(hour_angle, hand_half_width, hand_half_height) * 0.68f,
+                  show_weather ? 2.1f : 2.8f, 8);
+            lance(minute_angle, reach(minute_angle, hand_half_width, hand_half_height),
+                  show_weather ? 1.6f : 1.7f, show_weather ? 8.0f : 10.0f);
+        }
         if (_settings.show_seconds)
         {
             const float angle = time.wSecond * pi / 30;
-            hand(angle, reach(angle, 152, 112) - 12, 0.75f, 19, _settings.accent_color);
-            SolidBrush counterweight(text_color(_settings.accent_color, 255));
-            graphics.FillEllipse(&counterweight, center.X - (std::sin(angle) * 17) - 2,
-                                 center.Y + (std::cos(angle) * 17) - 2, 4.0f, 4.0f);
+            hand(angle, reach(angle, outer_width, outer_height) - 12, 0.75f, 19, _settings.accent_color);
+            if (show_weather == false)
+            {
+                SolidBrush counterweight(text_color(_settings.accent_color, 255));
+                graphics.FillEllipse(&counterweight, center.X - (std::sin(angle) * 17) - 2,
+                                     center.Y + (std::cos(angle) * 17) - 2, 4.0f, 4.0f);
+            }
         }
         SolidBrush hub(text_color(color, 255));
         graphics.FillEllipse(&hub, center.X - 3, center.Y - 3, 6.0f, 6.0f);
         SolidBrush pin(text_color(_settings.accent_color, 255));
         graphics.FillEllipse(&pin, center.X - 1.25f, center.Y - 1.25f, 2.5f, 2.5f);
+        if (show_weather)
+        {
+            SYSTEMTIME utc = {};
+            GetSystemTime(&utc);
+            const auto selection = netatmo_selection(weather, _settings.netatmo_module_id, utc_ticks(utc),
+                                                     _settings.netatmo_refresh_seconds);
+            const auto *module = ((selection.availability == NetatmoAvailability::ready) || selection.stale())
+                                     ? selection.module
+                                     : nullptr;
+            const int readings =
+                module == nullptr ? 0 : (_settings.netatmo_readings & module->available_readings);
+            int count = 0;
+            for (int index = 0; index < 4; ++index)
+                if ((readings & (1 << index)) != 0)
+                    ++count;
+            const bool no_data = count == 0;
+            if (no_data)
+                count = 1;
+            const CodexUsageText codex =
+                format_codex_usage(usage, utc_ticks(utc), _settings.codex_refresh_seconds);
+            if (_settings.show_codex_usage)
+                ++count;
+            const float row_height = count >= 4 ? 58.0f : 70.0f;
+            int row = 0;
+            const auto draw_cell = [&](int reading, const std::wstring &value, const wchar_t *unit,
+                                       COLORREF ink, int position) {
+                const float top = ((240 - (row_height * count)) * 0.5f) + (row_height * position) +
+                                  ((row_height - 50) * 0.5f);
+                draw_reading(graphics, reading, value, unit, top,
+                             static_cast<float>(_settings.reading_font_size + (reading == 0 ? 2 : 0)), ink,
+                             (reading >= 0) && (reading < 4) && selection.stale());
+            };
+            if (no_data)
+            {
+                draw_cell(-1, L"—", L"", metric_color(0, 0, color), row);
+                ++row;
+            }
+            else
+            {
+                const wchar_t *units[] = {L"°", L"%", L"ppm", L"dB"};
+                for (int index = 0; index < 4; ++index)
+                {
+                    if ((readings & (1 << index)) == 0)
+                        continue;
+                    wchar_t value[64] = {};
+                    swprintf_s(value, index == 0 ? L"%.1f" : L"%.0f", module->values[index]);
+                    draw_cell(index, value, units[index], metric_color(index, module->values[index], color),
+                              row++);
+                }
+            }
+            if (_settings.show_codex_usage && (codex.remaining_percent >= 0))
+                draw_cell(4, std::to_wstring(codex.remaining_percent), L"%",
+                          metric_color(4, codex.remaining_percent, color), row);
+        }
+        if (locked)
+            draw_lock_overlay(graphics, show_weather ? 184.0f : 320.0f, show_weather ? 184.0f : 320.0f,
+                              elapsed_minutes, lock_time_known, color);
         return finish();
     }
 
-    if (_settings.label.empty() == false)
+    if ((locked == false) && (_settings.label.empty() == false))
         draw_centered(graphics, _settings.label, L"Segoe UI", 11, 27, 20, color, 165, 0);
-    else if (_settings.show_weekday)
+    else if ((locked == false) && _settings.show_weekday)
         draw_centered(graphics, text.weekday, L"Segoe UI", 11, 27, 20, color, 165, 0);
 
     std::wstring clock = text.time;
@@ -574,10 +829,31 @@ std::unique_ptr<Bitmap> ClockRenderer::render_frame(const SYSTEMTIME &time, bool
                   _settings.font_style);
     if (detail.empty() == false)
         draw_centered(graphics, detail, L"Segoe UI", 17, detail_top, 25, _settings.accent_color, 220, 0);
-    SolidBrush accent(text_color(_settings.accent_color, 140));
-    graphics.FillRectangle(&accent, 149, 196, 22, 1);
-    if (_settings.show_date)
-        draw_centered(graphics, text.date, L"Segoe UI", 12, 208, 20, color, 180, 0);
+    if (locked)
+    {
+        SYSTEMTIME utc = {};
+        GetSystemTime(&utc);
+        const auto codex = format_codex_usage(usage, utc_ticks(utc), _settings.codex_refresh_seconds);
+        const bool show_usage = _settings.show_codex_usage && (codex.remaining_percent >= 0);
+        draw_lock_overlay(graphics, 320, show_usage ? 212.0f : 320.0f, elapsed_minutes, lock_time_known,
+                          color);
+        if (show_usage)
+        {
+            const COLORREF ink = metric_color(4, codex.remaining_percent, color);
+            draw_reading_icon(graphics, 4, 221, 213, ink);
+            Font font(L"Segoe UI", 24, FontStyleRegular, UnitPixel);
+            SolidBrush brush(text_color(ink, 255));
+            format.SetLineAlignment(StringAlignmentCenter);
+            graphics.DrawString(codex.value.c_str(), -1, &font, RectF(242, 213, 76, 26), &format, &brush);
+        }
+    }
+    else
+    {
+        SolidBrush accent(text_color(_settings.accent_color, 140));
+        graphics.FillRectangle(&accent, 149, 196, 22, 1);
+        if (_settings.show_date)
+            draw_centered(graphics, text.date, L"Segoe UI", 12, 208, 20, color, 180, 0);
+    }
     return finish();
 }
 

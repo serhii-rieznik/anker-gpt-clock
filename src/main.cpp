@@ -30,6 +30,9 @@ struct SharedState
     bool paused = false;
     LockSession lock_session;
     CodexUsage usage;
+    NetatmoData weather;
+    bool netatmo_refresh_requested = false;
+    bool netatmo_querying = false;
     bool update_requested = false;
 };
 
@@ -40,10 +43,14 @@ class App
     {
         _state.settings = load_settings(preferences_key);
         _state.usage = load_codex_usage();
+        if (_state.settings.show_netatmo)
+            _state.weather = load_netatmo_data();
         _stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         _wake_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         _usage_wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if ((_stop_event == nullptr) || (_wake_event == nullptr) || (_usage_wake_event == nullptr))
+        _netatmo_wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if ((_stop_event == nullptr) || (_wake_event == nullptr) || (_usage_wake_event == nullptr) ||
+            (_netatmo_wake_event == nullptr))
             throw_windows_error("Create update events");
         _icon = static_cast<HICON>(LoadImageW(_instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_SHARED));
         _taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
@@ -53,7 +60,7 @@ class App
     {
         stop();
         if (IsWindow(_settings_window) != FALSE)
-            PostMessageW(_settings_window, WM_CLOSE, 0, 0);
+            PostMessageW(_settings_window, WM_APP + 7, reinterpret_cast<WPARAM>(_controller), 0);
         if (_settings_process != nullptr)
             CloseHandle(_settings_process);
         if (_tray_added)
@@ -72,6 +79,8 @@ class App
             CloseHandle(_wake_event);
         if (_usage_wake_event != nullptr)
             CloseHandle(_usage_wake_event);
+        if (_netatmo_wake_event != nullptr)
+            CloseHandle(_netatmo_wake_event);
     }
 
     void start(bool startup, bool paused)
@@ -106,6 +115,7 @@ class App
         add_tray();
         _worker = std::thread([this] { run_worker(); });
         _usage_worker = std::thread([this] { run_usage_worker(); });
+        _netatmo_worker = std::thread([this] { run_netatmo_worker(); });
         if ((startup == false) && _state.settings.show_settings_on_launch)
             show_settings();
     }
@@ -128,11 +138,14 @@ class App
     HANDLE _stop_event = nullptr;
     HANDLE _wake_event = nullptr;
     HANDLE _usage_wake_event = nullptr;
+    HANDLE _netatmo_wake_event = nullptr;
     HICON _icon = nullptr;
     UINT _taskbar_created = 0;
     bool _tray_added = false;
     std::thread _worker;
     std::thread _usage_worker;
+    std::thread _netatmo_worker;
+    NetatmoClient _netatmo_client;
     SharedState _state;
     HANDLE _settings_process = nullptr;
     DWORD _settings_process_id = 0;
@@ -141,6 +154,7 @@ class App
     {
         if (_stop_event != nullptr)
             SetEvent(_stop_event);
+        _netatmo_client.cancel();
         if (_worker.joinable())
         {
             CancelSynchronousIo(_worker.native_handle());
@@ -148,6 +162,8 @@ class App
         }
         if (_usage_worker.joinable())
             _usage_worker.join();
+        if (_netatmo_worker.joinable())
+            _netatmo_worker.join();
     }
 
     NOTIFYICONDATAW tray_data() const
@@ -212,6 +228,7 @@ class App
             bool paused;
             LockSession lock_session;
             CodexUsage usage;
+            NetatmoData weather;
             bool forced;
             {
                 std::lock_guard lock(_state.mutex);
@@ -226,6 +243,8 @@ class App
                 paused = _state.paused;
                 lock_session = _state.lock_session;
                 usage = _state.usage;
+                weather.modules = _state.weather.modules;
+                weather.fetched_utc_ticks = _state.weather.fetched_utc_ticks;
                 forced = _state.update_requested;
                 _state.update_requested = false;
             }
@@ -264,7 +283,7 @@ class App
                     {
                         auto connection = std::make_unique<HubConnection>(_stop_event, _wake_event);
                         connection->connect();
-                        connection->initialize(settings.exclusive_gallery);
+                        connection->initialize();
                         hub = std::move(connection);
                         brightness = 0;
                         last_image.clear();
@@ -286,22 +305,25 @@ class App
                     {
                         const ULONGLONG now = utc_ticks(utc);
                         const ULONGLONG interval =
-                            static_cast<ULONGLONG>(lock_session.locked ? 60 : settings.interval_seconds) *
+                            static_cast<ULONGLONG>(scheduled_lock_minutes != 0 ? 60
+                                                                               : settings.interval_seconds) *
                             10000000;
                         const bool timed = (forced == false) && (settings_changed == false) &&
                                            (reconnecting == false) && (lock_changed == false) &&
-                                           (lock_elapsed_changed == false) && (scheduled_target != 0) &&
-                                           ((scheduled_target + interval) > now);
+                                           (scheduled_target != 0) && ((scheduled_target + interval) > now);
                         const ULONGLONG target = timed ? scheduled_target : now;
-                        const SYSTEMTIME time = renderer->time_at(
-                            utc_from_ticks(lock_session.locked ? lock_session.locked_utc_ticks : target));
-                        const ULONGLONG elapsed_minutes =
-                            timed ? scheduled_lock_minutes : lock_session.elapsed_minutes(GetTickCount64());
+                        const SYSTEMTIME time = renderer->time_at(utc_from_ticks(target));
+                        const ULONGLONG target_ms =
+                            GetTickCount64() + (target > now ? (target - now) / 10000 : 0);
+                        const ULONGLONG elapsed_minutes = (timed && (scheduled_lock_minutes != 0))
+                                                              ? scheduled_lock_minutes
+                                                              : lock_session.elapsed_minutes(target_ms);
                         const ULONGLONG render_start = GetTickCount64();
-                        auto bitmap = lock_session.locked
-                                          ? renderer->render_locked(time, elapsed_minutes,
-                                                                    lock_session.lock_time_known, usage)
-                                          : renderer->render(time, usage);
+                        auto bitmap =
+                            lock_session.locked
+                                ? renderer->render_locked(time, elapsed_minutes, lock_session.lock_time_known,
+                                                          usage, weather)
+                                : renderer->render(time, usage, weather);
                         auto image = renderer->encode(*bitmap);
                         const ULONGLONG render_ms = GetTickCount64() - render_start;
                         if (image != last_image)
@@ -314,11 +336,18 @@ class App
                             swprintf_s(stamp, L"%02d:%02d:%02d", time.wHour, time.wMinute, time.wSecond);
                             std::wstring status;
                             if (lock_session.locked)
+                            {
+                                const SYSTEMTIME locked_at =
+                                    renderer->time_at(utc_from_ticks(lock_session.locked_utc_ticks));
+                                wchar_t lock_stamp[32] = {};
+                                swprintf_s(lock_stamp, L"%02d:%02d:%02d", locked_at.wHour, locked_at.wMinute,
+                                           locked_at.wSecond);
                                 status = (suspended ? L"Paused · " : L"") +
                                          (lock_session.lock_time_known
-                                              ? L"Locked at " + std::wstring(stamp) + L" · "
+                                              ? L"Locked at " + std::wstring(lock_stamp) + L" · "
                                               : std::wstring(L"Windows locked · observed for ")) +
-                                         format_locked_duration(elapsed_minutes);
+                                         format_locked_duration(elapsed_minutes) + L"\nUpdated " + stamp;
+                            }
                             else
                                 status = (suspended ? L"Paused · updated " : L"Connected · updated ") +
                                          std::wstring(stamp);
@@ -337,21 +366,24 @@ class App
                         rendered_lock_minutes = elapsed_minutes;
                     }
                     GetSystemTime(&utc);
-                    if (lock_session.locked)
+                    const UpdateSchedule next_clock =
+                        next_update_schedule(utc, settings.interval_seconds, preparation_ms + 750);
+                    pending_target = next_clock.target_utc_ticks;
+                    pending_lock_minutes = 0;
+                    delay = next_clock.delay_ms;
+                    if (lock_session.locked && (settings.interval_seconds > 60))
                     {
                         const ULONGLONG monotonic_ms = GetTickCount64();
                         const LockUpdateSchedule next =
                             next_lock_update(lock_session, monotonic_ms, preparation_ms + 750);
-                        pending_target = utc_ticks(utc) + ((next.target_ms - monotonic_ms) * 10000);
-                        pending_lock_minutes = next.elapsed_minutes;
-                        delay = next.delay_ms;
-                    }
-                    else
-                    {
-                        const UpdateSchedule next =
-                            next_update_schedule(utc, settings.interval_seconds, preparation_ms + 750);
-                        pending_target = next.target_utc_ticks;
-                        delay = next.delay_ms;
+                        const ULONGLONG lock_target =
+                            utc_ticks(utc) + ((next.target_ms - monotonic_ms) * 10000);
+                        if (lock_target < pending_target)
+                        {
+                            pending_target = lock_target;
+                            pending_lock_minutes = next.elapsed_minutes;
+                            delay = next.delay_ms;
+                        }
                     }
                     if (suspended)
                     {
@@ -491,6 +523,77 @@ class App
         PostMessageW(_controller, WM_NULL, 0, 0);
     }
 
+    void run_netatmo_worker()
+    {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        const HANDLE events[] = {_stop_event, _netatmo_wake_event};
+        ULONGLONG next_query = 0;
+        int refresh_seconds = 0;
+        bool was_enabled = false;
+        NetatmoData data = load_netatmo_data();
+        while (WaitForSingleObject(_stop_event, 0) != WAIT_OBJECT_0)
+        {
+            Settings settings;
+            bool paused, forced;
+            {
+                std::lock_guard lock(_state.mutex);
+                settings = _state.settings;
+                paused = _state.paused;
+                forced = _state.netatmo_refresh_requested;
+                _state.netatmo_refresh_requested = false;
+            }
+            SYSTEM_POWER_STATUS power = {};
+            const bool battery = settings.pause_on_battery && (GetSystemPowerStatus(&power) != FALSE) &&
+                                 (power.ACLineStatus == 0);
+            const bool enabled =
+                settings.show_netatmo && (settings.layout == 2) && (paused == false) && (battery == false);
+            const ULONGLONG now = GetTickCount64();
+            if (forced ||
+                (enabled && ((was_enabled == false) ||
+                             (refresh_seconds != settings.netatmo_refresh_seconds) || (now >= next_query))))
+            {
+                {
+                    std::lock_guard lock(_state.mutex);
+                    _state.netatmo_querying = true;
+                }
+                try
+                {
+                    data = _netatmo_client.query(_stop_event);
+                }
+                catch (const std::exception &error)
+                {
+                    data.status = widen(error.what());
+                }
+                if (WaitForSingleObject(_stop_event, 0) == WAIT_OBJECT_0)
+                    break;
+                try
+                {
+                    save_netatmo_data(data);
+                }
+                catch (const std::exception &error)
+                {
+                    data.status = widen(error.what());
+                }
+                {
+                    std::lock_guard lock(_state.mutex);
+                    _state.weather = data;
+                    _state.netatmo_querying = false;
+                }
+                next_query =
+                    GetTickCount64() + (static_cast<ULONGLONG>(settings.netatmo_refresh_seconds) * 1000);
+            }
+            was_enabled = enabled;
+            refresh_seconds = settings.netatmo_refresh_seconds;
+            const ULONGLONG current = GetTickCount64();
+            const DWORD delay =
+                enabled ? static_cast<DWORD>(next_query > current ? next_query - current : 0) : INFINITE;
+            if (WaitForMultipleObjects(2, events, FALSE, delay) == WAIT_OBJECT_0)
+                break;
+        }
+        CoUninitialize();
+    }
+
     void toggle_pause()
     {
         {
@@ -499,6 +602,7 @@ class App
         }
         SetEvent(_wake_event);
         SetEvent(_usage_wake_event);
+        SetEvent(_netatmo_wake_event);
         update_status();
     }
 
@@ -550,7 +654,23 @@ class App
                 return 0;
             case settings_query_message: {
                 std::lock_guard lock(app->_state.mutex);
-                return (app->_state.paused ? 1 : 0) | (app->_state.connected ? 2 : 0);
+                SYSTEM_POWER_STATUS power = {};
+                const bool battery = app->_state.settings.pause_on_battery &&
+                                     (GetSystemPowerStatus(&power) != FALSE) && (power.ACLineStatus == 0);
+                return (app->_state.paused ? 1 : 0) | (app->_state.connected ? 2 : 0) |
+                       ((app->_state.netatmo_querying || app->_state.netatmo_refresh_requested) ? 4 : 0) |
+                       (battery ? 8 : 0);
+            }
+            case WM_APP + 6: {
+                if ((app->_settings_window == nullptr) ||
+                    (reinterpret_cast<HWND>(wparam) != app->_settings_window))
+                    return 0;
+                {
+                    std::lock_guard lock(app->_state.mutex);
+                    app->_state.netatmo_refresh_requested = true;
+                }
+                SetEvent(app->_netatmo_wake_event);
+                return 1;
             }
             case settings_register_message: {
                 const HWND sender = reinterpret_cast<HWND>(wparam);
@@ -581,6 +701,7 @@ class App
                 }
                 SetEvent(app->_wake_event);
                 SetEvent(app->_usage_wake_event);
+                SetEvent(app->_netatmo_wake_event);
                 return 1;
             }
             case WM_COMMAND:
@@ -613,6 +734,7 @@ class App
                         app->_state.lock_session.observe(locked, true, utc_ticks(utc), GetTickCount64());
                         SetEvent(app->_wake_event);
                         SetEvent(app->_usage_wake_event);
+                        SetEvent(app->_netatmo_wake_event);
                     }
                 }
                 return 0;
@@ -622,6 +744,7 @@ class App
                 std::lock_guard lock(app->_state.mutex);
                 SetEvent(app->_wake_event);
                 SetEvent(app->_usage_wake_event);
+                SetEvent(app->_netatmo_wake_event);
                 return TRUE;
             }
             case WM_QUERYENDSESSION:

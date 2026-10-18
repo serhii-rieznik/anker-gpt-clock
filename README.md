@@ -3,17 +3,18 @@
 A lightweight Windows tray app that puts a clock on the display of the
 [Anker A210C desktop USB-C hub](https://www.anker.com/products/a210c-10-in-1-desktop-usb-c-hub-dual-4k-smart-display).
 
-![Analog clock with ivory numerals on black](docs/images/analog.jpg)
+![Soft Frame analog clock with Netatmo readings and Codex usage](docs/images/analog.jpg)
 
 ![Digital clock on a gradient background](docs/images/digital.jpg)
 
 ## What it does
 
-- Analog and digital clocks with adjustable fonts, sizes, colors, and time zone.
+- Three analog clock faces and digital clocks with adjustable fonts, sizes, colors, and time zone.
+- Browse fonts with clock previews and [compare them side by side](docs/images/font-comparison.png).
 - Gradient backgrounds, your own images, or pure black. Gradient smoothing reduces visible banding.
 - A configurable refresh interval, every 10 seconds by default.
-- A lock screen showing when Windows was locked and how many minutes have passed.
-- Optional Codex usage, automatic start with Windows, and pause on battery.
+- A lock badge and elapsed lock duration on the clock.
+- Optional Netatmo readings and Codex usage, automatic start with Windows, and pause on battery.
 
 ![Settings window](docs/images/settings.png)
 
@@ -30,8 +31,18 @@ Requires Windows 10 or 11 (x64) and .NET Framework 4.8.
 Anker Dock Manager is not required. Close it if it is running so the two apps
 do not compete for the display. The hub fades between images.
 
-The app replaces the current image and keeps your other saved photos.
-Enabling **Use the gallery only for this clock** clears the gallery when connecting.
+The app uses the gallery only for the clock. Old images are removed without backups.
+
+## Netatmo readings
+
+In **Settings → Netatmo**, import a TXT or JSON file containing your Netatmo client ID,
+client secret, access token and refresh token. Windows protects the stored credentials.
+Choose a module, the readings to display and a refresh interval. Temperature, humidity,
+CO₂ and noise are supported where available; the default display uses temperature,
+CO₂ and noise.
+
+Old readings stay visible with a small clock badge. Settings shows measurement age,
+connection errors and refresh status.
 
 ## Codex usage
 

@@ -6,6 +6,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <LangVersion>latest</LangVersion>
     <AssemblyName>AnkerClock.Settings</AssemblyName>
+    <Version>1.1.0</Version>
     <RootNamespace>AnkerClock</RootNamespace>
     <ApplicationManifest>..\resources\app.manifest</ApplicationManifest>
     <ApplicationIcon>..\resources\clock.ico</ApplicationIcon>
@@ -13,6 +14,7 @@
     <DebugType>none</DebugType>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="System.Drawing" />
     <Resource Include="..\resources\clock.ico" Link="clock.ico" />
   </ItemGroup>
 </Project>

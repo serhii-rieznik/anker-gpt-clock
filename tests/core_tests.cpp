@@ -251,7 +251,7 @@ void test_background_dithering(const std::filesystem::path &output)
                 Gdiplus::Color c;
                 next->GetPixel(x, y, &c);
                 stationary &= b.GetValue() == c.GetValue();
-                if (y < 16)
+                if ((y < 16) && ((x < 32) || (x >= 288)))
                 {
                     locked->GetPixel(x, y, &c);
                     stationary &= b.GetValue() == c.GetValue();
@@ -593,6 +593,39 @@ void test_rendering(const std::filesystem::path &output)
     Gdiplus::Color corner;
     dimmed->GetPixel(10, 10, &corner);
     check((corner.GetR() > 100) && (corner.GetR() < 140), "Image dimming was not applied");
+    const CLSID png = image_encoder(L"image/png");
+    for (const int scale : {1, 2})
+    {
+        Gdiplus::Bitmap uniform(320 * scale, 240 * scale, PixelFormat24bppRGB);
+        Gdiplus::Graphics source(&uniform);
+        source.Clear(Gdiplus::Color(255, 240, 240, 240));
+        const auto path = output / (L"uniform-wallpaper-" + std::to_wstring(scale) + L".png");
+        check(uniform.Save(path.c_str(), &png, nullptr) == Gdiplus::Ok, "Could not save wallpaper fixture");
+        settings.background_path = path.wstring();
+        settings.background_dither = 0;
+        for (const int dim : {0, 50, 85})
+        {
+            settings.image_dim = dim;
+            renderer.configure(settings);
+            auto frame = renderer.render(time);
+            write_image(output / (L"wallpaper-edge-" + std::to_wstring(scale) + L"-" + std::to_wstring(dim) +
+                                  L".jpg"),
+                        renderer.encode(*frame));
+            Gdiplus::Color interior;
+            frame->GetPixel(10, 10, &interior);
+            for (const auto &point : {Gdiplus::Point(0, 0), Gdiplus::Point(160, 0), Gdiplus::Point(0, 120),
+                                      Gdiplus::Point(319, 0), Gdiplus::Point(0, 239)})
+            {
+                Gdiplus::Color edge;
+                frame->GetPixel(point.X, point.Y, &edge);
+                check(std::abs(edge.GetR() - interior.GetR()) <= 1,
+                      ("Wallpaper edge differs from interior at " + std::to_string(point.X) + "," +
+                       std::to_string(point.Y) + ": " + std::to_string(edge.GetR()) + " vs " +
+                       std::to_string(interior.GetR()))
+                          .c_str());
+            }
+        }
+    }
     settings.background_path = (output / L"missing.jpg").wstring();
     bool rejected = false;
     try
@@ -650,6 +683,8 @@ void test_preferences()
     settings.theme = 5;
     settings.font_size = 54;
     settings.analog_font_size = 28;
+    settings.analog_face = 2;
+    settings.reading_font_size = 28;
     settings.font_style = 1;
     settings.layout = 2;
     settings.date_format = 2;
@@ -667,10 +702,28 @@ void test_preferences()
     settings.show_weekday = false;
     settings.pause_on_battery = true;
     settings.show_settings_on_launch = false;
-    settings.exclusive_gallery = true;
     settings.show_codex_usage = true;
     save_settings(settings, key.c_str());
     check(load_settings(key.c_str()) == settings, "Preferences did not round-trip");
+    HKEY legacy_preferences = nullptr;
+    check(RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE, &legacy_preferences) ==
+              ERROR_SUCCESS,
+          "Could not open legacy gallery preferences");
+    for (const DWORD legacy_gallery : {0UL, 1UL})
+    {
+        check(RegSetValueExW(legacy_preferences, L"ExclusiveGallery", 0, REG_DWORD,
+                             reinterpret_cast<const BYTE *>(&legacy_gallery),
+                             sizeof(legacy_gallery)) == ERROR_SUCCESS,
+              "Could not set legacy gallery preference");
+        check(load_settings(key.c_str()) == settings, "Legacy gallery preference still changes settings");
+    }
+    RegCloseKey(legacy_preferences);
+    settings.show_netatmo = true;
+    settings.netatmo_module_id = L"living";
+    settings.netatmo_readings = netatmo_temperature | netatmo_co2;
+    settings.netatmo_refresh_seconds = 60;
+    save_settings(settings, key.c_str());
+    check(load_settings(key.c_str()) == settings, "Netatmo preferences did not round-trip");
     settings.theme = 6;
     save_settings(settings, key.c_str());
     check(load_settings(key.c_str()) == settings, "Pure black background did not persist");
@@ -714,11 +767,21 @@ void test_ui_contract()
     settings.theme = 6;
     settings.interval_seconds = 86400;
     settings.analog_font_size = 32;
+    settings.analog_face = 2;
+    settings.reading_font_size = 38;
     settings.background_dither = 8;
-    settings.exclusive_gallery = true;
+    settings.show_netatmo = true;
+    settings.netatmo_module_id = L"station";
+    settings.netatmo_refresh_seconds = 86400;
+    settings.netatmo_readings = 15;
     const SettingsWire wire = settings_to_wire(settings, true);
     check(settings_from_wire(wire) == settings, "UI settings changed in the binary contract");
     check(wire.start_windows == 1, "Startup flag did not cross the UI boundary");
+    check((wire.flags & 128) == 0, "Removed gallery toggle is still exported to Settings");
+    auto legacy_gallery_option = wire;
+    legacy_gallery_option.flags |= 128;
+    check(settings_from_wire(legacy_gallery_option) == settings,
+          "Deprecated gallery flag still changes settings");
     auto legacy_lock_option = wire;
     legacy_lock_option.flags |= 32;
     check(settings_from_wire(legacy_lock_option) == settings,
@@ -744,12 +807,22 @@ void test_ui_contract()
     invalid.analog_font_size = 33;
     reject(invalid);
     invalid = wire;
+    invalid.analog_face = -1;
+    reject(invalid);
+    invalid.analog_face = 3;
+    reject(invalid);
+    invalid = wire;
+    invalid.reading_font_size = 27;
+    reject(invalid);
+    invalid.reading_font_size = 39;
+    reject(invalid);
+    invalid = wire;
     invalid.interval_seconds = 0;
     reject(invalid);
     invalid.interval_seconds = 86401;
     reject(invalid);
     invalid = wire;
-    invalid.flags = 512;
+    invalid.flags = 1024;
     reject(invalid);
     invalid = wire;
     invalid.codex_refresh_seconds = 59;
@@ -760,6 +833,26 @@ void test_ui_contract()
     invalid.background_dither = -1;
     reject(invalid);
     invalid.background_dither = 9;
+    reject(invalid);
+    invalid = wire;
+    invalid.netatmo_refresh_seconds = 59;
+    reject(invalid);
+    invalid.netatmo_refresh_seconds = 86401;
+    reject(invalid);
+    invalid = wire;
+    invalid.netatmo_readings = 0;
+    reject(invalid);
+    invalid.netatmo_readings = 16;
+    reject(invalid);
+    invalid = wire;
+    invalid.layout = 2;
+    invalid.flags |= 256;
+    reject(invalid);
+    invalid.netatmo_readings = 13;
+    check(settings_from_wire(invalid).netatmo_readings == 13,
+          "Three weather readings and Codex were rejected");
+    invalid = wire;
+    std::fill(std::begin(invalid.netatmo_module_id), std::end(invalid.netatmo_module_id), L'A');
     reject(invalid);
     invalid = wire;
     invalid.start_windows = 2;
@@ -814,7 +907,7 @@ void test_transfer_cancellation()
     CloseHandle(stop);
 }
 
-void test_hub(const std::filesystem::path &output, bool exclusive_gallery)
+void test_hub(const std::filesystem::path &output)
 {
     HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     try
@@ -822,12 +915,7 @@ void test_hub(const std::filesystem::path &output, bool exclusive_gallery)
         HubConnection hub(stop);
         hub.connect();
         std::wcout << L"Connected: " << hub.port_name() << L'\n';
-        const auto initial = hub.gallery();
-        const auto initial_current = hub.current_image();
-        const int expected_count = exclusive_gallery ? 1 : std::max(1, static_cast<int>(initial[3]));
-        const BYTE protected_slots =
-            exclusive_gallery ? 0 : static_cast<BYTE>(initial[5] & ~(1 << initial_current[2]));
-        hub.initialize(exclusive_gallery);
+        hub.initialize();
         hub.set_brightness(100);
         ClockRenderer renderer;
         Settings settings;
@@ -841,8 +929,7 @@ void test_hub(const std::filesystem::path &output, bool exclusive_gallery)
             expected = renderer.encode(*bitmap);
             const FrameResult result = hub.replace_image(expected);
             const auto gallery = hub.gallery();
-            check(gallery[3] == expected_count, "Clock images accumulated in the gallery");
-            check((gallery[5] & protected_slots) == protected_slots, "An unrelated gallery slot was removed");
+            check(gallery[3] == 1, "Old images remained in the clock gallery");
             write_image(output / (L"hub-frame-" + std::to_wstring(frame) + L".jpg"), expected);
             if (frame > 0)
                 results << ',';
@@ -857,8 +944,7 @@ void test_hub(const std::filesystem::path &output, bool exclusive_gallery)
         const auto actual = hub.read_image();
         check(actual == expected, "Physical clock image differs from rendered source");
         write_image(output / L"physical-clock.jpg", actual);
-        results << "],\"byteVerified\":true,\"galleryCount\":" << expected_count
-                << ",\"protectedSlots\":" << static_cast<int>(protected_slots) << '}';
+        results << "],\"byteVerified\":true,\"galleryCount\":1}";
     }
     catch (...)
     {
@@ -903,9 +989,8 @@ void test_hub_recovery(const std::filesystem::path &output)
     {
         HubConnection hub(stop);
         hub.connect();
-        hub.initialize(false);
+        hub.initialize();
         const auto before = hub.gallery();
-        const BYTE protected_slots = static_cast<BYTE>(before[5] & ~(1 << before[4]));
         const auto original = hub.read_image();
         const FrameResult result = hub.replace_image(original);
         check(result.crc != image_crc(original), "Existing image identifier was reused");
@@ -914,16 +999,16 @@ void test_hub_recovery(const std::filesystem::path &output)
         check(result.crc == image_crc(expected), "Collision changed the JPEG unexpectedly");
         WaitForSingleObject(stop, 1500);
         check(hub.read_image() == expected, "Collision-safe JPEG differs on the device");
-        const auto journal = [&](uint16_t pending, uint16_t previous) {
+        const auto journal = [&](uint16_t pending, uint16_t previous, bool had_previous, BYTE count) {
             const BYTE record[] = {'A',
                                    'C',
                                    1,
-                                   1,
+                                   static_cast<BYTE>(had_previous),
                                    static_cast<BYTE>(pending >> 8),
                                    static_cast<BYTE>(pending),
                                    static_cast<BYTE>(previous >> 8),
                                    static_cast<BYTE>(previous),
-                                   before[3]};
+                                   count};
             HKEY key = nullptr;
             check(RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\AnkerClock", 0, nullptr, 0, KEY_SET_VALUE,
                                   nullptr, &key, nullptr) == ERROR_SUCCESS,
@@ -940,14 +1025,16 @@ void test_hub_recovery(const std::filesystem::path &output)
             const auto current = hub.current_image();
             check(((current[3] << 8) | current[4]) == result.crc, "Recovery selected another image");
             const auto after = hub.gallery();
-            check((after[3] == before[3]) && ((after[5] & protected_slots) == protected_slots),
-                  "Recovery altered unrelated gallery occupancy");
+            check(after[3] == 1, "Recovery retained old gallery images");
         };
-        journal(image_crc(original), result.crc);
-        hub.initialize(false);
+        journal(image_crc(original), result.crc, true, before[3]);
+        hub.initialize();
         recovered();
-        journal(result.crc, image_crc(original));
-        hub.initialize(false);
+        journal(result.crc, image_crc(original), true, before[3]);
+        hub.initialize();
+        recovered();
+        journal(result.crc, image_crc(original), false, 1);
+        hub.initialize();
         recovered();
         write_image(output / L"physical-recovery.jpg", expected);
     }
@@ -1205,12 +1292,12 @@ void test_codex_usage(const std::filesystem::path &output)
             disabled->GetPixel(x, y, &b);
             if (a.GetValue() == b.GetValue())
                 continue;
-            if ((x >= 190) && (x <= 263) && (y >= 95) && (y <= 150))
+            if ((x >= 56) && (x <= 129) && (y >= 95) && (y <= 150))
                 ++inset_difference;
-            if ((x < 180) && (y < 145))
+            else if ((x < 180) && (y < 145))
                 ++perimeter_difference;
         }
-    check(inset_difference > 80, "Codex allowance was not drawn between the hands and 3 o'clock");
+    check(inset_difference > 80, "Codex allowance was not drawn in the free inset opposite the date");
     check(perimeter_difference == 0, "Codex inset moved the hands or numerals");
 
     settings.layout = 0;
@@ -1243,7 +1330,7 @@ void test_codex_usage(const std::filesystem::path &output)
                     latest_ink = std::max(latest_ink, static_cast<int>(y));
                 }
             }
-        check(header_difference == 0, "Locked usage changed the lock timestamp or elapsed time");
+        check(header_difference == 0, "Locked usage changed the clock or lock badge");
         check((usage_pixels > 150) && ((latest_ink - earliest_ink) >= 20),
               "Locked usage was missing or too small to read");
     }
@@ -1256,6 +1343,396 @@ void test_codex_usage(const std::filesystem::path &output)
         check_jpeg(jpeg);
         write_image(output / variant.first, jpeg);
     }
+}
+
+void test_netatmo(const std::filesystem::path &output)
+{
+    const auto credentials =
+        parse_netatmo_credentials(L"client_id = example-client\nclient_secret: example-secret\naccess_token "
+                                  L"= 'example-access|token'\nrefresh_token = example-refresh\n");
+    check(credentials.access_token == L"example-access|token", "Netatmo text credentials did not parse");
+    const auto json_credentials = parse_netatmo_credentials(
+        LR"({"client_id":"example-client","client_secret":"example-secret","access_token":"example-access|token","refresh_token":"example-refresh"})");
+    check(json_credentials.refresh_token == credentials.refresh_token,
+          "Netatmo JSON credentials did not parse");
+    bool rejected = false;
+    try
+    {
+        parse_netatmo_credentials(L"client_id = example-client");
+    }
+    catch (const std::exception &)
+    {
+        rejected = true;
+    }
+    check(rejected, "Incomplete Netatmo credentials were accepted");
+    const std::wstring key = L"Software\\AnkerClock.Tests.Netatmo." + std::to_wstring(GetCurrentProcessId());
+    struct Cleanup
+    {
+        std::wstring key;
+        ~Cleanup()
+        {
+            RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+        }
+    } cleanup{key};
+    save_netatmo_credentials(credentials, key.c_str());
+    const auto restored = load_netatmo_credentials(key.c_str());
+    check((restored.client_id == credentials.client_id) &&
+              (restored.client_secret == credentials.client_secret) &&
+              (restored.access_token == credentials.access_token) &&
+              (restored.refresh_token == credentials.refresh_token),
+          "Protected Netatmo credentials did not round-trip");
+    DWORD type = 0, bytes = 0;
+    check(RegGetValueW(HKEY_CURRENT_USER, key.c_str(), L"Credentials", RRF_RT_REG_BINARY, &type, nullptr,
+                       &bytes) == ERROR_SUCCESS,
+          "Netatmo credentials were not stored as a protected binary blob");
+    SYSTEMTIME utc = {};
+    GetSystemTime(&utc);
+    const ULONGLONG now = utc_ticks(utc);
+    const auto unix_stamp = std::to_wstring((now - 116444736000000000) / 10000000);
+    const std::wstring response =
+        LR"({"body":{"devices":[{"_id":"station","module_name":"Station","reachable":true,"data_type":["Temperature","Humidity","CO2","Noise"],"dashboard_data":{"time_utc":)" +
+        unix_stamp +
+        LR"(,"Temperature":21.9,"Humidity":44,"CO2":704,"Noise":40},"modules":[{"_id":"living","module_name":"Living Room","reachable":true,"data_type":["Temperature","Humidity","CO2"],"dashboard_data":{"time_utc":)" +
+        unix_stamp +
+        LR"(,"Temperature":20.7,"Humidity":49,"CO2":676}},{"_id":"bedroom","module_name":"Bedroom","reachable":false,"data_type":["Temperature","Humidity","CO2"]}]}]}})";
+    auto data = parse_netatmo_data(response, now);
+    check(data.modules.size() == 3, "Netatmo module discovery lost a module");
+    check(data.modules[0].available_readings == 15, "Main station lost noise or other readings");
+    check(data.modules[1].supported_readings == 7, "Indoor module falsely supports noise");
+    check(data.modules[2].available_readings == 0, "Offline module invented zero-valued measurements");
+    check(selected_netatmo_module(data, L"living", now, 60) == &data.modules[1],
+          "Selected module was ignored");
+    check(selected_netatmo_module(data, L"missing", now, 60) == nullptr,
+          "Missing module fell back to another room");
+    check(selected_netatmo_module(data, L"bedroom", now, 60) == nullptr, "Offline room retained readings");
+    check(selected_netatmo_module(data, L"station", now + 12000000000, 60) == &data.modules[0],
+          "Old cached readings disappeared instead of being marked stale");
+    auto old_measurement = data;
+    old_measurement.modules[0].measured_utc_ticks -= 36000000000;
+    check(selected_netatmo_module(old_measurement, L"station", now, 60) == &old_measurement.modules[0],
+          "Old station measurements disappeared instead of being marked stale");
+    check(netatmo_module_options(data).find(L"living\tLiving Room\t7") != std::wstring::npos,
+          "Module choices lost capability metadata");
+    Settings settings;
+    settings.layout = 2;
+    settings.theme = 6;
+    settings.font = L"Arial";
+    settings.show_netatmo = true;
+    settings.netatmo_module_id = L"station";
+    settings.netatmo_readings = 15;
+    check(netatmo_diagnostics(data, settings, now).find(L"Weather available for display.") == 0,
+          "Fresh weather was diagnosed as hidden");
+    check(netatmo_diagnostics(data, settings, now).find(L"Last successful fetch:") != std::wstring::npos,
+          "Weather diagnostics omitted the successful fetch timestamp");
+    check(netatmo_selection(data, L"station", now + 12000000000, 60).availability ==
+              NetatmoAvailability::cache_expired,
+          "Expired weather cache lost its reason");
+    check(netatmo_diagnostics(data, settings, now + 12000000000).find(L"fetch is too old") !=
+              std::wstring::npos,
+          "Expired cache was reported as connected weather");
+    check(netatmo_selection(old_measurement, L"station", now, 60).availability ==
+              NetatmoAvailability::measurement_expired,
+          "Old measurement lost its reason");
+    check(netatmo_diagnostics(old_measurement, settings, now)
+                  .find(L"Measurements become stale after 60 minutes") != std::wstring::npos,
+          "Fresh fetch with old measurements omitted the display cutoff");
+    check(netatmo_selection(data, L"bedroom", now, 60).availability == NetatmoAvailability::module_offline,
+          "Offline module was misdiagnosed");
+    check(netatmo_selection(data, L"missing", now, 60).availability == NetatmoAvailability::module_missing,
+          "Missing module was misdiagnosed");
+    check(netatmo_selection(NetatmoData{}, L"station", now, 60).availability == NetatmoAvailability::no_cache,
+          "Missing cache was misdiagnosed");
+    check(netatmo_selection(data, L"station", now - 1, 60).availability ==
+              NetatmoAvailability::invalid_fetch_time,
+          "Future fetch timestamp was accepted");
+    auto missing_measurement = data;
+    missing_measurement.modules[0].measured_utc_ticks = 0;
+    check(netatmo_selection(missing_measurement, L"station", now, 60).availability ==
+              NetatmoAvailability::no_measurement,
+          "Missing measurement timestamp was accepted");
+    missing_measurement.modules[0].measured_utc_ticks = now + 1;
+    check(netatmo_selection(missing_measurement, L"station", now, 60).availability ==
+              NetatmoAvailability::invalid_measurement_time,
+          "Future measurement timestamp was accepted");
+    auto partial = data;
+    partial.modules[0].available_readings = netatmo_temperature;
+    check(netatmo_diagnostics(partial, settings, now).find(L"some selected readings are missing") !=
+              std::wstring::npos,
+          "Partial measurements were reported as complete");
+    partial.modules[0].available_readings = 0;
+    check(netatmo_diagnostics(partial, settings, now).find(L"none of the selected readings") !=
+              std::wstring::npos,
+          "Empty measurements were reported as available");
+    auto disabled = settings;
+    disabled.show_netatmo = false;
+    check(netatmo_diagnostics(data, disabled, now).find(L"readings are turned off") != std::wstring::npos,
+          "Disabled weather omitted its display reason");
+    disabled.layout = 0;
+    check(netatmo_diagnostics(data, disabled, now).find(L"this clock face") != std::wstring::npos,
+          "Unsupported clock face omitted its display reason");
+    ClockRenderer renderer;
+    renderer.configure(settings);
+    auto image = renderer.render(sample_time(), CodexUsage{}, data);
+    const auto jpeg = renderer.encode(*image);
+    check_jpeg(jpeg);
+    check(jpeg.size() <= 65515, "Netatmo clock exceeds the hub image limit");
+    write_image(output / L"netatmo-station.jpg", jpeg);
+    int value_pixels = 0, first_ink = 240, last_ink = 0;
+    for (UINT y = 14; y < 53; ++y)
+        for (UINT x = 216; x < 318; ++x)
+        {
+            Gdiplus::Color pixel;
+            image->GetPixel(x, y, &pixel);
+            if (std::max({pixel.GetR(), pixel.GetG(), pixel.GetB()}) > 100)
+            {
+                ++value_pixels;
+                first_ink = std::min(first_ink, static_cast<int>(y));
+                last_ink = std::max(last_ink, static_cast<int>(y));
+            }
+        }
+    check((value_pixels > 180) && ((last_ink - first_ink) >= 20), "Netatmo values were missing or too small");
+    settings.netatmo_readings = 13;
+    settings.show_codex_usage = true;
+    renderer.configure(settings);
+    CodexUsage usage;
+    usage.count = 1;
+    usage.fetched_utc_ticks = now;
+    usage.windows[0].remaining_percent = 91;
+    auto without_usage = renderer.render(sample_time(), CodexUsage{}, data);
+    auto with_usage = renderer.render(sample_time(), usage, data);
+    int usage_pixels = 0, weather_changes = 0;
+    for (UINT y = 0; y < 240; ++y)
+        for (UINT x = 0; x < 320; ++x)
+        {
+            Gdiplus::Color a, b;
+            without_usage->GetPixel(x, y, &a);
+            with_usage->GetPixel(x, y, &b);
+            if (a.GetValue() == b.GetValue())
+                continue;
+            if ((x >= 214) && (y >= 178))
+                ++usage_pixels;
+            if ((x >= 214) && (y < 174))
+                ++weather_changes;
+        }
+    check(usage_pixels > 80, "Codex usage disappeared when Netatmo was enabled");
+    check(weather_changes == 0, "Codex usage overwrote weather readings");
+    write_image(output / L"netatmo-codex.jpg", renderer.encode(*with_usage));
+    auto stale_frame = renderer.render(sample_time(), usage, old_measurement);
+    auto stale_locked = renderer.render_locked(sample_time(), 61, true, usage, old_measurement);
+    int badge_changes[3] = {}, outside_badges = 0, locked_reading_changes = 0;
+    for (UINT y = 0; y < 240; ++y)
+        for (UINT x = 0; x < 320; ++x)
+        {
+            Gdiplus::Color fresh, stale, locked;
+            with_usage->GetPixel(x, y, &fresh);
+            stale_frame->GetPixel(x, y, &stale);
+            stale_locked->GetPixel(x, y, &locked);
+            if (fresh.GetValue() != stale.GetValue())
+            {
+                const int row = static_cast<int>(y) / 58;
+                const bool in_badge = (row < 3) && (x >= 197) && (x < 217) &&
+                                      (y >= static_cast<UINT>(36 + (58 * row))) &&
+                                      (y < static_cast<UINT>(55 + (58 * row)));
+                if (in_badge)
+                    ++badge_changes[row];
+                else
+                    ++outside_badges;
+            }
+            if (x >= 187)
+                locked_reading_changes += stale.GetValue() != locked.GetValue() ? 1 : 0;
+        }
+    check((badge_changes[0] > 25) && (badge_changes[1] > 25) && (badge_changes[2] > 25),
+          "Stale weather omitted an icon badge");
+    check(outside_badges == 0, "Stale badges changed the reading values or Codex row");
+    check(locked_reading_changes == 0, "Stale weather badges disappeared on the lock display");
+    auto stale_cache = data;
+    stale_cache.fetched_utc_ticks -= 12000000000;
+    auto cached_frame = renderer.render(sample_time(), usage, stale_cache);
+    const auto stale_jpeg = renderer.encode(*stale_frame);
+    check(stale_jpeg.size() <= 65515, "Stale clock badges exceed the hub image limit");
+    write_image(output / L"netatmo-stale.jpg", stale_jpeg);
+    const auto changed_pixels = [](Gdiplus::Bitmap &first, Gdiplus::Bitmap &second, UINT begin, UINT end) {
+        int changes = 0;
+        for (UINT y = 0; y < 240; ++y)
+            for (UINT x = begin; x < end; ++x)
+            {
+                Gdiplus::Color a, b;
+                first.GetPixel(x, y, &a);
+                second.GetPixel(x, y, &b);
+                changes += a.GetValue() != b.GetValue() ? 1 : 0;
+            }
+        return changes;
+    };
+    check(changed_pixels(*stale_frame, *cached_frame, 187, 320) == 0,
+          "Stale fetch and stale measurement badges use different display behavior");
+    for (int face = 0; face < 3; ++face)
+    {
+        settings.analog_face = face;
+        renderer.configure(settings);
+        auto variant = renderer.render(sample_time(), usage, data);
+        check(changed_pixels(*with_usage, *variant, 187, 320) == 0,
+              "Clock face selection changed the reading column");
+        if (face > 0)
+            check(changed_pixels(*with_usage, *variant, 0, 187) > 80, "Analog styles draw the same face");
+        const auto encoded = renderer.encode(*variant);
+        check(encoded.size() <= 65515, "Analog face with readings exceeds the hub image limit");
+        write_image(output / (L"netatmo-face-" + std::to_wstring(face) + L".jpg"), encoded);
+        SYSTEMTIME date_time = sample_time();
+        date_time.wDay = 13;
+        auto dated = renderer.render(date_time, usage, data);
+        write_image(output / (L"netatmo-date-face-" + std::to_wstring(face) + L".jpg"),
+                    renderer.encode(*dated));
+        write_image(output / (L"netatmo-date-locked-face-" + std::to_wstring(face) + L".jpg"),
+                    renderer.encode(*renderer.render_locked(date_time, 61, true, usage, data)));
+        settings.show_date = false;
+        renderer.configure(settings);
+        auto hidden_date = renderer.render(date_time, usage, data);
+        settings.show_date = true;
+        renderer.configure(settings);
+        date_time.wDay = 14;
+        auto next_day = renderer.render(date_time, usage, data);
+        date_time.wDay = 13;
+        date_time.wMonth = 11;
+        auto next_month = renderer.render(date_time, usage, data);
+        int date_changes = 0, outside_date_changes = 0, day_changes = 0, month_changes = 0;
+        for (UINT y = 0; y < 240; ++y)
+            for (UINT x = 0; x < 320; ++x)
+            {
+                Gdiplus::Color visible, hidden, day, month;
+                dated->GetPixel(x, y, &visible);
+                hidden_date->GetPixel(x, y, &hidden);
+                next_day->GetPixel(x, y, &day);
+                next_month->GetPixel(x, y, &month);
+                const bool in_date = (x >= 100) && (x < (face == 2 ? 152U : 146U)) && (y >= 90) && (y < 150);
+                if (visible.GetValue() != hidden.GetValue())
+                    in_date ? ++date_changes : ++outside_date_changes;
+                if (in_date && (y < 123))
+                    day_changes += visible.GetValue() != day.GetValue() ? 1 : 0;
+                if (in_date && (y >= 123))
+                    month_changes += visible.GetValue() != month.GetValue() ? 1 : 0;
+            }
+        check((date_changes > 80) && (outside_date_changes == 0),
+              "Show date changed the hands, numeral 3 or weather column outside the middle inset");
+        check((day_changes > 20) && (month_changes > 20),
+              "Stacked date did not update the day above the month");
+        auto locked = renderer.render_locked(sample_time(), 61, true, usage, data);
+        check(changed_pixels(*variant, *locked, 187, 320) == 0,
+              "Lock overlay changed the weather or Codex reading column");
+        write_image(output / (L"netatmo-locked-face-" + std::to_wstring(face) + L".jpg"),
+                    renderer.encode(*locked));
+        auto next_minute = renderer.render_locked(sample_time(), 62, true, usage, data);
+        auto unknown = renderer.render_locked(sample_time(), 61, false, usage, data);
+        SYSTEMTIME later = sample_time();
+        later.wMinute = (later.wMinute + 1) % 60;
+        auto live = renderer.render_locked(later, 61, true, usage, data);
+        int dial_changes = 0, live_changes = 0, duration_changes = 0, unknown_changes = 0;
+        int outside_footer_changes = 0;
+        for (UINT y = 0; y < 240; ++y)
+            for (UINT x = 0; x < 184; ++x)
+            {
+                Gdiplus::Color plain, overlay, next, observed, updated;
+                variant->GetPixel(x, y, &plain);
+                locked->GetPixel(x, y, &overlay);
+                next_minute->GetPixel(x, y, &next);
+                unknown->GetPixel(x, y, &observed);
+                live->GetPixel(x, y, &updated);
+                if ((y >= 30) && (y < 212))
+                {
+                    dial_changes += plain.GetValue() != overlay.GetValue() ? 1 : 0;
+                    live_changes += overlay.GetValue() != updated.GetValue() ? 1 : 0;
+                }
+                duration_changes += overlay.GetValue() != next.GetValue() ? 1 : 0;
+                unknown_changes += overlay.GetValue() != observed.GetValue() ? 1 : 0;
+                if ((y < 214) &&
+                    ((overlay.GetValue() != next.GetValue()) || (overlay.GetValue() != observed.GetValue())))
+                    ++outside_footer_changes;
+            }
+        check(dial_changes == 0, "Lock overlay moved or obscured the square dial");
+        check(live_changes > 20, "Locked clock hands do not show the current time");
+        check((duration_changes > 20) && (unknown_changes > 20) && (outside_footer_changes == 0),
+              "Lock duration or its startup lower bound was missing or changed the dial");
+        auto long_lock = renderer.render_locked(sample_time(), 525600, false, usage, data);
+        write_image(output / (L"netatmo-locked-long-" + std::to_wstring(face) + L".jpg"),
+                    renderer.encode(*long_lock));
+    }
+    auto extremes = data;
+    extremes.modules[0].values[0] = -15;
+    extremes.modules[0].values[2] = 4000;
+    extremes.modules[0].values[3] = 95;
+    auto full_usage = usage;
+    full_usage.windows[0].remaining_percent = 100;
+    settings.reading_font_size = 38;
+    renderer.configure(settings);
+    auto largest = renderer.render(sample_time(), full_usage, extremes);
+    write_image(output / L"netatmo-long-values.jpg", renderer.encode(*largest));
+    int edge_ink = 0;
+    for (UINT y = 0; y < 240; ++y)
+        for (UINT x = 317; x < 320; ++x)
+        {
+            Gdiplus::Color pixel;
+            largest->GetPixel(x, y, &pixel);
+            edge_ink += std::max({pixel.GetR(), pixel.GetG(), pixel.GetB()}) > 64 ? 1 : 0;
+        }
+    check(edge_ink == 0, "Long readings or their units are clipped at the screen edge");
+    settings.reading_font_size = 28;
+    renderer.configure(settings);
+    auto smaller = renderer.render(sample_time(), usage, data);
+    check(changed_pixels(*with_usage, *smaller, 187, 320) > 80, "Reading size does not change the display");
+    settings.reading_font_size = 32;
+    settings.analog_face = 0;
+    renderer.configure(settings);
+    const auto check_ink = [&](Gdiplus::Bitmap &bitmap, int row, COLORREF expected) {
+        int pixels = 0;
+        const UINT top = 8 + (58 * row);
+        for (UINT y = top; y < (top + 50); ++y)
+            for (UINT x = 217; x < 318; ++x)
+            {
+                Gdiplus::Color pixel;
+                bitmap.GetPixel(x, y, &pixel);
+                if ((std::abs(pixel.GetR() - GetRValue(expected)) <= 15) &&
+                    (std::abs(pixel.GetG() - GetGValue(expected)) <= 15) &&
+                    (std::abs(pixel.GetB() - GetBValue(expected)) <= 15))
+                    ++pixels;
+            }
+        if (pixels <= 50)
+            write_image(output / L"severity-failure.jpg", renderer.encode(bitmap));
+        check(pixels > 50, ("Reading severity color is missing or outside row " + std::to_string(row) + " (" +
+                            std::to_string(pixels) + " pixels)")
+                               .c_str());
+    };
+    for (const auto &[value, expected] :
+         {std::pair{999, RGB(138, 172, 155)}, std::pair{1000, RGB(186, 164, 111)},
+          std::pair{1999, RGB(186, 164, 111)}, std::pair{2000, RGB(186, 130, 132)}})
+    {
+        auto colored = data;
+        colored.modules[0].values[2] = value;
+        check_ink(*renderer.render(sample_time(), usage, colored), 1, expected);
+    }
+    for (const auto &[value, expected] :
+         {std::pair{54, RGB(138, 172, 155)}, std::pair{55, RGB(186, 164, 111)},
+          std::pair{84, RGB(186, 164, 111)}, std::pair{85, RGB(186, 130, 132)}})
+    {
+        auto colored = data;
+        colored.modules[0].values[3] = value;
+        check_ink(*renderer.render(sample_time(), usage, colored), 2, expected);
+    }
+    for (const auto &[value, expected] :
+         {std::pair{50, RGB(138, 172, 155)}, std::pair{49, RGB(186, 164, 111)},
+          std::pair{20, RGB(186, 164, 111)}, std::pair{19, RGB(186, 130, 132)}})
+    {
+        auto colored = usage;
+        colored.windows[0].remaining_percent = value;
+        check_ink(*renderer.render(sample_time(), colored, data), 3, expected);
+    }
+    settings.netatmo_module_id = L"living";
+    settings.netatmo_readings = 7;
+    renderer.configure(settings);
+    write_image(output / L"netatmo-living.jpg",
+                renderer.encode(*renderer.render(sample_time(), CodexUsage{}, data)));
+    settings.netatmo_readings = 4;
+    renderer.configure(settings);
+    write_image(output / L"netatmo-co2.jpg",
+                renderer.encode(*renderer.render(sample_time(), CodexUsage{}, data)));
 }
 
 void probe_codex(const std::filesystem::path &output)
@@ -1303,7 +1780,7 @@ int wmain(int argc, wchar_t **argv)
                          "  --codex           Query local Codex and update its usage cache\n"
                          "  --probe           Read hub metadata\n"
                          "  --capture-current Read the current hub image\n"
-                         "  --hub-current     Replace the current hub image with test frames\n"
+                         "  --hub-current     Show test frames; removes old gallery images\n"
                          "  --hub-recovery    Exercise transfer recovery on the connected hub\n"
                          "  --hub             Clear the gallery and send test frames; requires\n"
                          "                    --allow-gallery-clear after the output directory\n";
@@ -1331,13 +1808,14 @@ int wmain(int argc, wchar_t **argv)
         test_ui_contract();
         test_codex_discovery(output);
         test_codex_usage(output);
+        test_netatmo(output);
         test_transfer_cancellation();
         if ((argc > 1) && (wcscmp(argv[1], L"--codex") == 0))
             probe_codex(output);
         if ((argc > 1) && (wcscmp(argv[1], L"--hub") == 0))
-            test_hub(output, true);
+            test_hub(output);
         if ((argc > 1) && (wcscmp(argv[1], L"--hub-current") == 0))
-            test_hub(output, false);
+            test_hub(output);
         if ((argc > 1) && (wcscmp(argv[1], L"--probe") == 0))
             probe_hub(output);
         if ((argc > 1) && (wcscmp(argv[1], L"--hub-recovery") == 0))

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(AnkerClock VERSION 1.0.0 LANGUAGES CXX RC)
+project(AnkerClock VERSION 1.1.0 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Anker Clock requires Windows")
@@ -7,11 +7,11 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_library(clock_core STATIC src/settings.cpp src/renderer.cpp src/hub.cpp src/ui_contract.cpp src/lock_session.cpp src/codex_usage.cpp)
+add_library(clock_core STATIC src/settings.cpp src/renderer.cpp src/hub.cpp src/ui_contract.cpp src/lock_session.cpp src/codex_usage.cpp src/netatmo.cpp)
 target_compile_features(clock_core PUBLIC cxx_std_20)
 target_compile_definitions(clock_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_include_directories(clock_core PUBLIC src)
-target_link_libraries(clock_core PUBLIC gdiplus ole32 oleaut32 windowscodecs shell32 advapi32 setupapi user32 gdi32 uuid runtimeobject)
+target_link_libraries(clock_core PUBLIC gdiplus ole32 oleaut32 windowscodecs shell32 advapi32 setupapi user32 gdi32 uuid runtimeobject winhttp crypt32)
 
 add_executable(AnkerClock WIN32 src/main.cpp resources/app.rc resources/app.manifest)
 target_link_libraries(AnkerClock PRIVATE clock_core wtsapi32)

@@ -261,7 +261,7 @@ CodexUsage query_codex_usage(HANDLE stop_event)
     output_write.close();
     send_json(input_write.value,
               "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"anker_clock\","
-              "\"title\":\"Anker Clock\",\"version\":\"1.0.0\"}}}\n");
+              "\"title\":\"Anker Clock\",\"version\":\"1.1.0\"}}}\n");
     std::string pending;
     size_t received = 0;
     const ULONGLONG deadline = GetTickCount64() + 20000;

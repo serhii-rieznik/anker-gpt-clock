@@ -1,4 +1,4 @@
-﻿param([string]$Exe = "$PSScriptRoot\..\build\Release\AnkerClock.exe", [switch]$Hardware, [switch]$InspectOnly)
+﻿param([string]$Exe = "$PSScriptRoot\..\build\Release\AnkerClock.exe", [switch]$Hardware, [switch]$InspectOnly, [switch]$Netatmo)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Drawing
 Add-Type @'
@@ -17,6 +17,8 @@ public static class ClockUi {
  [DllImport("wtsapi32.dll")] private static extern void WTSFreeMemory(IntPtr data);
  public static bool SessionLocked(){IntPtr data;uint bytes;if(!WTSQuerySessionInformation(IntPtr.Zero,0xffffffff,25,out data,out bytes))throw new InvalidOperationException("Could not query session state");try{return bytes>=20&&Marshal.ReadInt32(data)==1&&Marshal.ReadInt32(data,16)==0;}finally{WTSFreeMemory(data);}}
  public static IntPtr Controller(){return FindWindow("AnkerClock.Controller",null);}
+ public static IntPtr FontPicker(){return FindWindow(null,"Choose clock font");}
+ public static IntPtr UnsavedPrompt(){return FindWindow(null,"Unsaved changes");}
  public static string Status(){var s=new StringBuilder(2048);GetWindowText(Controller(),s,s.Capacity);return s.ToString();}
 }
 '@
@@ -28,12 +30,40 @@ function Assert($value, [string]$message) { if (!$value) { throw $message }; $sc
 function Wait-For([scriptblock]$condition, [string]$message, [int]$timeout = 5000) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do { if (& $condition) { return }; Start-Sleep -Milliseconds 40 } while ($timer.ElapsedMilliseconds -lt $timeout)
-    throw $message
+    $detail = if ($script:window) { try { (Element 'Validation').Current.Name } catch { '' } } else { '' }
+    throw "$message`: $detail"
 }
 function Element([string]$id) {
     $e = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
         (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,$id)))
     if (!$e) { throw "Missing control: $id" }; return $e
+}
+function Visible([string]$id) {
+    $e = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+        (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,$id)))
+    return $e -and !$e.Current.IsOffscreen
+}
+function Font-Picker {
+    $script:settingsWindow = $script:window
+    Invoke 'Font'
+    Wait-For {
+        $handle = [ClockUi]::FontPicker()
+        $script:fontWindow = if ($handle -ne [IntPtr]::Zero) { [Windows.Automation.AutomationElement]::FromHandle($handle) } else { $null }
+        $null -ne $script:fontWindow
+    } 'Font browser did not open'
+    $script:window = $script:fontWindow
+}
+function Font-Item([string]$name) {
+    $item = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+        (New-Object Windows.Automation.AndCondition(
+            (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::ListItem)),
+            (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,$name)))))
+    return $item
+}
+function Compare-Font([string]$name) {
+    $toggle = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+        (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,"Compare $name")))
+    (Pattern $toggle 'Toggle').Toggle()
 }
 function Pattern($element, [string]$type) {
     return $element.GetCurrentPattern(([type]"Windows.Automation.${type}Pattern")::Pattern)
@@ -83,13 +113,14 @@ function Escape {
     [ClockUi]::PostMessage($script:uiProcess.MainWindowHandle,0x100,[IntPtr]27,[IntPtr]1) | Out-Null
     [ClockUi]::PostMessage($script:uiProcess.MainWindowHandle,0x101,[IntPtr]27,[IntPtr]0xC0000001L) | Out-Null
 }
-function Capture([string]$name) {
+function Capture([string]$name, [IntPtr]$handle = [IntPtr]::Zero) {
     Start-Sleep -Milliseconds 250
     $rect = New-Object ClockUi+Rect
-    [ClockUi]::GetWindowRect($script:uiProcess.MainWindowHandle,[ref]$rect) | Out-Null
+    if ($handle -eq [IntPtr]::Zero) { $handle = $script:uiProcess.MainWindowHandle }
+    [ClockUi]::GetWindowRect($handle,[ref]$rect) | Out-Null
     $bitmap = New-Object Drawing.Bitmap(($rect.Right-$rect.Left),($rect.Bottom-$rect.Top))
     $g = [Drawing.Graphics]::FromImage($bitmap); $dc = $g.GetHdc()
-    try { Assert ([ClockUi]::PrintWindow($script:uiProcess.MainWindowHandle,$dc,2)) 'Capture failed' } finally { $g.ReleaseHdc($dc) }
+    try { Assert ([ClockUi]::PrintWindow($handle,$dc,2)) 'Capture failed' } finally { $g.ReleaseHdc($dc) }
     try {
         $colors = New-Object 'Collections.Generic.HashSet[int]'
         for ($y=0; $y -lt $bitmap.Height; $y+=8) {
@@ -114,7 +145,7 @@ $process = $null
 try {
     Assert ([ClockUi]::Controller() -eq [IntPtr]::Zero) 'Quit the existing clock before testing'
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath)
-    foreach ($name in @('Theme','Layout','FontStyle','PauseOnBattery')) {
+    foreach ($name in @('Theme','Layout','AnalogFace','FontStyle','PauseOnBattery')) {
         $value = switch ($name) { 'Theme' { 6 } 'Layout' { 2 } default { 0 } }
         $key.SetValue($name,$value,[Microsoft.Win32.RegistryValueKind]::DWord)
     }
@@ -126,6 +157,65 @@ try {
     $watch = [Diagnostics.Stopwatch]::StartNew(); Open-Settings; $openMs = $watch.ElapsedMilliseconds
     Wait-For { (Element 'Status').Current.Name -eq 'Updates paused' } 'The clock was not paused' 10000
     Assert (([ClockUi]::SendMessage([ClockUi]::Controller(),0x8004,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64() -band 1) -eq 1) 'The clock was not paused'
+    if ($Netatmo) {
+        $codexEnabled = if ($backup.ContainsKey('ShowCodexUsage')) { [bool]$backup['ShowCodexUsage'][0] } else { $false }
+        Select-Item 'ClockTab'; Set-Switch 'ShowCodexUsage' $false
+        Select-Item 'NetatmoTab'
+        Invoke 'RefreshNetatmo'
+        Wait-For { (Element 'NetatmoStatus').Current.Name.Contains('Connected to Netatmo') } 'Netatmo did not connect' 20000
+        Assert ((Element 'NetatmoAge').Current.Name.Contains('Last successful fetch:')) 'Weather diagnostics omit the fetch timestamp'
+        Assert ((Element 'NetatmoAge').Current.Name.Contains('measurement:')) 'Weather diagnostics omit the measurement timestamp'
+        Assert ((Element 'NetatmoPolling').Current.Name.StartsWith('Automatic refresh paused.')) 'Paused polling is not explained'
+        $weather = Get-ItemProperty 'HKCU:\Software\AnkerClock\Netatmo'
+        $station = (ConvertFrom-Json $weather.Data).body.devices[0]
+        $indoor = @($station.modules | Where-Object { $_.reachable -and $_.data_type -contains 'Temperature' -and $_.data_type -notcontains 'Noise' })[0]
+        Assert ($null -ne $indoor) 'This check needs a second reachable indoor module'
+        Set-Switch 'ShowNetatmo' $true
+        Select-Combo 'NetatmoModule' $station.module_name
+        Assert ((Element 'NetatmoNoise').Current.IsEnabled) 'Main station noise is disabled'
+        foreach ($id in @('NetatmoTemperature','NetatmoHumidity','NetatmoCo2','NetatmoNoise')) { Set-Switch $id $true }
+        Set-Text 'NetatmoRefreshSeconds' '60'; Save
+        $saved = Get-ItemProperty 'HKCU:\Software\AnkerClock'
+        Assert ($saved.NetatmoModule -eq $station._id) 'Selected station was not saved'
+        Assert ($saved.NetatmoReadings -eq 15 -and $saved.NetatmoRefreshSeconds -eq 60) 'Reading choices or interval were not saved'
+        Select-Combo 'NetatmoModule' $indoor.module_name
+        Assert (!(Visible 'NetatmoNoise')) 'Indoor module incorrectly offers noise'
+        Select-Item 'ClockTab'; Set-Switch 'ShowCodexUsage' $true; Save
+        Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').NetatmoReadings -eq 7) 'An unavailable noise reading counted toward the Codex display limit'
+        Set-Switch 'ShowCodexUsage' $false; Save; Select-Item 'NetatmoTab'
+        Set-Switch 'NetatmoCo2' $false; Save
+        Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').NetatmoModule -eq $indoor._id) 'Room selection was not saved'
+        Assert (((Get-ItemProperty 'HKCU:\Software\AnkerClock').NetatmoReadings -band 7) -eq 3) 'Individual reading selection was ignored'
+        Set-Text 'NetatmoRefreshSeconds' '59'
+        Wait-For { (Element 'Validation').Current.Name.Contains('60') -and !(Element 'Save').Current.IsEnabled } 'Invalid refresh interval was accepted'
+        Set-Text 'NetatmoRefreshSeconds' '60'
+        Select-Combo 'NetatmoModule' $station.module_name
+        foreach ($id in @('NetatmoTemperature','NetatmoHumidity','NetatmoCo2','NetatmoNoise')) { Set-Switch $id $false }
+        Wait-For { (Element 'Validation').Current.Name.StartsWith('Choose at least one') } 'Empty measurement selection was accepted'
+        foreach ($id in @('NetatmoTemperature','NetatmoHumidity','NetatmoCo2','NetatmoNoise')) { Set-Switch $id $true }
+        Set-Switch 'NetatmoHumidity' $false
+        Select-Item 'ClockTab'; Set-Switch 'ShowCodexUsage' $codexEnabled
+        foreach ($choice in @('Quiet Classic','Precision','Soft Frame')) {
+            Select-Combo 'AnalogFace' $choice; Save
+            $index = [Array]::IndexOf(@('Quiet Classic','Precision','Soft Frame'),$choice)
+            Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').AnalogFace -eq $index) 'Analog style was not saved'
+        }
+        Select-Item 'NetatmoTab'
+        (Pattern (Element 'ReadingFontSize') 'RangeValue').SetValue(30)
+        Save
+        Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').ReadingFontSize -eq 30) 'Reading value size was not saved'
+        Capture 'netatmo-settings'
+        Close-Settings; Open-Settings; Select-Item 'NetatmoTab'
+        Assert ((Text 'NetatmoRefreshSeconds') -eq '60') 'Netatmo interval was lost when reopening'
+        Assert ((Pattern (Element 'ReadingFontSize') 'RangeValue').Current.Value -eq 30) 'Reading size was lost when reopening'
+        Assert ((Pattern (Element 'NetatmoNoise') 'Toggle').Current.ToggleState -eq [Windows.Automation.ToggleState]::On) 'Noise selection was lost when reopening'
+        Select-Item 'ClockTab'
+        Assert ((Pattern (Element 'AnalogFace') 'Selection').Current.GetSelection()[0].Current.Name -eq 'Soft Frame') 'Analog style was lost when reopening'
+        Assert (((Pattern (Element 'ShowCodexUsage') 'Toggle').Current.ToggleState -eq [Windows.Automation.ToggleState]::On) -eq $codexEnabled) 'Netatmo changed the Codex usage preference'
+        Close-Settings
+        [ordered]@{assertions=$script:assertions;settingsOpenMs=$openMs;netatmo=$true} | ConvertTo-Json
+        return
+    }
     if ($InspectOnly) {
         Select-Item 'ClockTab'
         Assert ((Element 'ShowCodexUsage').Current.IsEnabled) 'Codex option is disabled on the analog face'
@@ -134,16 +224,18 @@ try {
         $codexInterval = if ($backup.ContainsKey('CodexRefreshSeconds')) { [string]$backup['CodexRefreshSeconds'][0] } else { '60' }
         Assert ((Text 'CodexRefreshSeconds') -eq $codexInterval) 'Codex refresh interval did not load'
         Assert ((Element 'CodexRefreshSeconds').Current.IsEnabled -eq $codex) 'Codex refresh availability differs'
-        Assert ((Element 'ShowDate').Current.IsEnabled -eq !$codex) 'Date switch does not reflect the Codex inset'
+        Assert ((Element 'ShowDate').Current.IsEnabled) 'Codex incorrectly disables the date switch'
         Select-Item 'StartupTab'
         $removed = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
             (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,'PauseWhenLocked')))
         Assert ($null -eq $removed) 'The lock-pause option is still visible'
         $launch = if ($backup.ContainsKey('ShowSettingsOnLaunch')) { [bool]$backup['ShowSettingsOnLaunch'][0] } else { $true }
-        $exclusive = if ($backup.ContainsKey('ExclusiveGallery')) { [bool]$backup['ExclusiveGallery'][0] } else { $false }
         Assert (((Pattern (Element 'OpenSettings') 'Toggle').Current.ToggleState -eq [Windows.Automation.ToggleState]::On) -eq $launch) 'Removing the lock option changed the launch flag'
         Select-Item 'DeviceTab'
-        Assert (((Pattern (Element 'ExclusiveGallery') 'Toggle').Current.ToggleState -eq [Windows.Automation.ToggleState]::On) -eq $exclusive) 'Removing the lock option changed the gallery flag'
+        $galleryToggle = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+            (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,'ExclusiveGallery')))
+        Assert ($null -eq $galleryToggle) 'The obsolete gallery preservation option is still offered'
+        Assert ((Element 'GalleryPolicy').Current.Name.Contains('no image backups')) 'Settings does not explain clock-only gallery cleanup'
         Assert ((Element 'Validation').Current.Name -eq 'Preview reflects your saved settings.') 'The settings preview failed'
         Select-Item 'AppearanceTab'
         Capture 'settings'
@@ -159,7 +251,7 @@ try {
     Assert (!$script:uiProcess.HasExited) 'Escape in a dropdown closed settings and discarded the draft'
     Assert ((Pattern $theme 'ExpandCollapse').Current.ExpandCollapseState -eq [Windows.Automation.ExpandCollapseState]::Collapsed) 'Escape did not close the dropdown'
     Select-Combo 'Theme' 'Pure black'; Select-Item 'ClockTab'; Select-Item 'Analog'; Select-Item 'AppearanceTab'
-    Assert ((Element 'BackgroundDither').Current.IsEnabled -eq $false) 'Pure black enables gradient smoothing'
+    Assert (!(Visible 'BackgroundDither')) 'Pure black shows irrelevant gradient smoothing'
     Assert ((Element 'AnalogFontSize').Current.IsEnabled) 'Analog numeral size is disabled'
     (Pattern (Element 'AnalogFontSize') 'RangeValue').SetValue(28)
     Assert ((Element 'Font').Current.IsEnabled) 'Analog font is disabled'
@@ -167,10 +259,27 @@ try {
     Assert ($second.WaitForExit(5000)) 'A second tray engine started'
     Assert ((Get-Process AnkerClock.Settings).Count -eq 1) 'A second settings window started'
     Capture 'modern-appearance'
-    Select-Combo 'Theme' 'Aurora'; Wait-For { (Element 'Save').Current.IsEnabled } 'Theme change did not enable Save'
+    Select-Combo 'Theme' 'Aurora'; Wait-For { Visible 'BackgroundDither' } 'Gradient controls did not appear'
     Assert ((Element 'BackgroundDither').Current.IsEnabled) 'Gradient smoothing is disabled for a gradient'
     (Pattern (Element 'BackgroundDither') 'RangeValue').SetValue(6)
-    Select-Combo 'Theme' 'Pure black'; Select-Combo 'FontStyle' 'Bold'; Save
+    Select-Combo 'Theme' 'Pure black'
+    Font-Picker
+    Set-Text 'FontSearch' 'Arial'
+    Wait-For { (Element 'FontPageStatus').Current.Name -like '*fonts' -and $null -ne (Font-Item 'Arial') } 'Font filtering failed'
+    (Pattern (Font-Item 'Arial') 'SelectionItem').Select()
+    Wait-For { (Element 'UseFont').Current.IsEnabled } 'Clock font preview did not render'
+    Capture 'font-gallery' ([ClockUi]::FontPicker())
+    Compare-Font 'Arial'; Compare-Font 'Arial Black'
+    Assert ((Element 'CompareFonts').Current.IsEnabled) 'Two pinned fonts did not enable comparison'
+    Invoke 'CompareFonts'; Assert (Visible 'FontComparison') 'Font comparison did not open'
+    Capture 'font-comparison' ([ClockUi]::FontPicker())
+    Invoke 'CompareFonts'
+    (Pattern (Font-Item 'Arial') 'SelectionItem').Select()
+    Invoke 'UseFont'; $script:window = $script:settingsWindow
+    Wait-For { [ClockUi]::FontPicker() -eq [IntPtr]::Zero } 'Font browser did not close'
+    Start-Sleep -Milliseconds 100
+    Wait-For { (Element 'Font').Current.HelpText -eq 'Arial' } 'Font selection did not return to Settings'
+    Select-Combo 'FontStyle' 'Bold'; Save
     Select-Item 'ClockTab'; Select-Item 'Digital'
     Assert ((Element 'ShowCodexUsage').Current.IsEnabled) 'Digital mode disables usage on the lock display'
     Set-Switch 'ShowCodexUsage' $true
@@ -180,6 +289,11 @@ try {
     Wait-For { (Element 'Validation').Current.Name -like 'Codex refresh must*' } 'Invalid locked usage interval was not rejected'
     Assert ((Element 'Save').Current.IsEnabled -eq $false) 'Invalid locked usage interval can be saved'
     Set-Text 'CodexRefreshSeconds' '60'
+    Select-Item 'NetatmoTab'
+    Assert ((Element 'NetatmoDisplayStatus').Current.Name.Contains('this clock face')) 'Weather diagnostics omit the unsupported face reason'
+    Assert (Visible 'UseAnalog') 'Digital mode does not explain how to enable station readings'
+    Assert (!(Visible 'NetatmoModule')) 'Digital exposes unused station display controls'
+    Select-Item 'ClockTab'
     Select-Item 'AppearanceTab'
     Assert ((Element 'FontSize').Current.IsEnabled) 'Digital font size is disabled'
     Select-Combo 'FontStyle' 'Regular'
@@ -189,15 +303,17 @@ try {
     Assert ((Element 'Save').Current.IsEnabled -eq $false) 'Invalid color can be saved'
     Set-Text 'TextColor' '#E8D9B7'; Set-Text 'AccentColor' '#B7A3F4'; Save
     Select-Item 'ClockTab'; Set-Text 'Label' 'Час · 東京'; Set-Switch 'ShowSeconds' $true; Select-Item 'Analog'; Save
+    Assert (!(Visible 'DateFormat')) 'Analog exposes an unused date format'
+    Assert (!(Visible 'VerticalOffset')) 'Analog exposes an unused position slider'
     Set-Switch 'ShowCodexUsage' $true
-    Assert ((Element 'ShowDate').Current.IsEnabled -eq $false) 'Date option still applies with the Codex inset enabled'
+    Assert ((Element 'ShowDate').Current.IsEnabled) 'Codex incorrectly disables the date option'
     Set-Text 'CodexRefreshSeconds' '59'
     Wait-For { (Element 'Validation').Current.Name -like 'Codex refresh must*' } 'Invalid Codex interval was not rejected'
     Assert ((Element 'Save').Current.IsEnabled -eq $false) 'Invalid Codex interval can be saved'
     Set-Text 'CodexRefreshSeconds' '120'; Save
     Set-Switch 'ShowCodexUsage' $false
     Assert ((Element 'ShowDate').Current.IsEnabled) 'Disabling Codex did not restore the date option'
-    Assert ((Element 'CodexRefreshSeconds').Current.IsEnabled -eq $false) 'Disabled Codex still enables refresh controls'
+    Assert (!(Visible 'CodexRefreshSeconds')) 'Disabled Codex still shows refresh controls'
     Save
     Set-Switch 'ShowCodexUsage' $true; Save
     Capture 'modern-clock'
@@ -207,19 +323,35 @@ try {
     Set-Text 'Interval' '0'; Start-Sleep -Milliseconds 250
     Assert ((Element 'Save').Current.IsEnabled -eq $false) 'Zero interval can be saved'
     Set-Text 'Interval' '17'; Save; Capture 'modern-device'
+    Set-Text 'Interval' '0'
+    Wait-For { (Visible 'ReviewError') } 'Invalid input did not expose error navigation'
+    Select-Item 'AppearanceTab'; Invoke 'ReviewError'
+    Assert ((Element 'Interval').Current.HasKeyboardFocus) 'Review did not focus the invalid setting'
+    Set-Text 'Interval' '17'
+    Wait-For { !(Visible 'ReviewError') } 'Corrected input left an error link'
     Select-Item 'StartupTab'; Set-Switch 'PauseOnBattery' $true; Save; Capture 'modern-startup'
     $removedOption = $script:window.FindFirst([Windows.Automation.TreeScope]::Descendants,
         (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::AutomationIdProperty,'PauseWhenLocked')))
     Assert ($null -eq $removedOption) 'The removed lock-pause option is still visible'
     Close-Settings; Open-Settings
+    Select-Item 'ClockTab'; Select-Combo 'AnalogFace' 'Soft Frame'
+    Select-Item 'AppearanceTab'
+    if ($backup.ContainsKey('ShowNetatmo') -and $backup['ShowNetatmo'][0]) {
+        Assert (!(Visible 'AnalogFontSize')) 'Soft Frame exposes unused numeral size'
+        Select-Item 'ClockTab'; Set-Switch 'ShowDate' $false
+        Select-Item 'AppearanceTab'; Assert (!(Visible 'Font')) 'Soft Frame without a date exposes unused typography'
+        Select-Item 'ClockTab'; Set-Switch 'ShowDate' $true
+    }
+    Select-Item 'ClockTab'; Select-Combo 'AnalogFace' 'Quiet Classic'
+    Wait-For { (Element 'Validation').Current.Name -ne 'Unsaved changes' } 'Reverted face left a stale dirty state'
     Select-Item 'DeviceTab'; Assert ((Text 'Interval') -eq '17') 'Interval did not persist'
-    Select-Item 'ClockTab'; Assert ((Text 'Label') -eq 'Час · 東京') 'Unicode heading did not persist'
-    Assert ((Element 'Use24Hour').Current.IsEnabled -eq $false) 'Analog hour format should be disabled'
+    Select-Item 'ClockTab'; Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').Label -eq 'Час · 東京') 'Unicode heading did not persist'
+    Assert (!(Visible 'Use24Hour')) 'Analog still shows irrelevant hour format'
     Assert ((Text 'CodexRefreshSeconds') -eq '120') 'Codex refresh interval did not persist'
     Assert ((Pattern (Element 'ShowCodexUsage') 'Toggle').Current.ToggleState -eq [Windows.Automation.ToggleState]::On) 'Codex display flag did not persist'
     Select-Item 'AppearanceTab'
     Assert ((Pattern (Element 'AnalogFontSize') 'RangeValue').Current.Value -eq 28) 'Analog numeral size did not persist'
-    Assert ((Pattern (Element 'BackgroundDither') 'RangeValue').Current.Value -eq 6) 'Gradient smoothing did not persist'
+    Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').BackgroundDither -eq 6) 'Hidden gradient smoothing preference did not persist'
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
     Assert ($key.GetValue('Layout') -eq 2) 'Layout did not reach native preferences'
     Assert ($key.GetValue('AnalogFontSize') -eq 28) 'Analog size did not reach native preferences'
@@ -230,7 +362,7 @@ try {
         Select-Combo 'Theme' 'Graphite'; Save
         Select-Item 'ClockTab'; Select-Combo 'TimeZone' 'Windows time zone (automatic)'
         Select-Item 'StartupTab'; Set-Switch 'PauseOnBattery' $false
-        Select-Item 'DeviceTab'; Set-Switch 'ExclusiveGallery' $false; Set-Text 'Interval' '86400'; Invoke 'UpdateNow'
+        Select-Item 'DeviceTab'; Set-Text 'Interval' '86400'; Invoke 'UpdateNow'
         Wait-For { [ClockUi]::Status().StartsWith('Paused · updated ') } 'Manual update failed' 15000
         $stamp = [TimeSpan]::Parse([ClockUi]::Status().Substring('Paused · updated '.Length))
         $difference = [Math]::Abs(([DateTime]::Now.TimeOfDay-$stamp).TotalSeconds)
@@ -266,6 +398,20 @@ try {
     Close-Settings
     for ($i=0; $i -lt 3; $i++) { Open-Settings; Close-Settings }
     Assert (!(Get-Process AnkerClock.Settings -ErrorAction SilentlyContinue)) 'A UI process remained after reopen cycles'
+    Open-Settings; Select-Item 'DeviceTab'; Set-Text 'Interval' '19'
+    Wait-For { (Element 'Validation').Current.Name -eq 'Unsaved changes' } 'Draft change was not detected'
+    Invoke 'Close'
+    Wait-For { [ClockUi]::UnsavedPrompt() -ne [IntPtr]::Zero } 'Closing discarded an unsaved draft'
+    [ClockUi]::PostMessage([ClockUi]::UnsavedPrompt(),0x111,[IntPtr]2,[IntPtr]::Zero) | Out-Null
+    Wait-For { [ClockUi]::UnsavedPrompt() -eq [IntPtr]::Zero } 'Cancel did not dismiss the close prompt'
+    Assert (!$script:uiProcess.HasExited) 'Cancel closed Settings'
+    Assert ((Text 'Interval') -eq '19') 'Cancel lost the unsaved draft'
+    Assert ((Get-ItemProperty 'HKCU:\Software\AnkerClock').Interval -eq 17) 'Cancel unexpectedly saved the draft'
+    Select-Item 'AppearanceTab'; (Pattern (Element 'AppearancePanel') 'Scroll').SetScrollPercent(-1,0)
+    Font-Picker
+    [ClockUi]::PostMessage([ClockUi]::Controller(),0x111,[IntPtr]4004,[IntPtr]::Zero) | Out-Null
+    Assert ($process.WaitForExit(5000)) 'Tray shutdown did not finish'
+    Assert ($script:uiProcess.WaitForExit(5000)) 'Tray shutdown left a font dialog or close prompt resident'
     $result = [ordered]@{assertions=$script:assertions;settingsOpenMs=$openMs;hardware=[bool]$Hardware;framework='WPF on demand'}
     $result | ConvertTo-Json | Set-Content "$outputDir\modern-ui-results.json"; $result | ConvertTo-Json
 } finally {

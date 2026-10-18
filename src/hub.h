@@ -23,7 +23,7 @@ class HubConnection
     HubConnection(const HubConnection &) = delete;
     HubConnection &operator=(const HubConnection &) = delete;
     void connect();
-    void initialize(bool exclusive_gallery);
+    void initialize();
     void set_brightness(int brightness);
     FrameResult replace_image(std::vector<BYTE> image);
     FrameResult replace_image(std::vector<BYTE> image, ULONGLONG select_at_utc_ticks);
@@ -40,7 +40,6 @@ class HubConnection
     std::wstring _port_name;
     uint16_t _current_crc = 0;
     bool _has_current_image = false;
-    int _gallery_count = 0;
     void write(const BYTE *data, DWORD count);
     void receive(BYTE first, BYTE command, BYTE *result, size_t count, DWORD timeout_ms);
     void read_bytes(BYTE *data, size_t count, ULONGLONG deadline);
@@ -52,5 +51,5 @@ class HubConnection
     bool crc_in_use(uint16_t crc);
     void save_pending_frame(uint16_t crc);
     void clear_pending_frame();
-    bool recover_pending_frame();
+    void recover_pending_frame();
 };

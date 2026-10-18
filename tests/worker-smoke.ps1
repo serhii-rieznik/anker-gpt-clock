@@ -54,7 +54,7 @@ try {
     if ($Hardware) {
         $before = Probe
         $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath)
-        foreach ($name in @('Interval','PauseOnBattery','PauseWhenLocked','ExclusiveGallery','Theme','ShowSeconds')) {
+        foreach ($name in @('Interval','PauseOnBattery','PauseWhenLocked','Theme','ShowSeconds')) {
             $value = switch ($name) { 'Interval' {86400} 'PauseWhenLocked' {1} 'Theme' {6} 'ShowSeconds' {1} default {0} }
             $key.SetValue($name,$value,[Microsoft.Win32.RegistryValueKind]::DWord)
         }
@@ -86,10 +86,11 @@ try {
             Start-Sleep -Milliseconds 50
         }
         Assert ($scheduled.Count -eq 3) 'Three scheduled frames did not complete'
+        $scheduled | ConvertTo-Json -Compress | Write-Host
         for ($i=0; $i -lt $scheduled.Count; $i++) {
             $time = [TimeSpan]::Parse($scheduled[$i].stamp)
             Assert (($time.Seconds % 10) -eq 0) 'A frame was not snapped to 10 seconds'
-            Assert ($scheduled[$i].lead -ge 0.45 -and $scheduled[$i].lead -le 0.55) 'Selection was not half a second early'
+            Assert ($scheduled[$i].lead -ge 0.45 -and $scheduled[$i].lead -le 0.55) "Selection at $($scheduled[$i].stamp) was $($scheduled[$i].lead) seconds early"
             if ($i -gt 0) { Assert (((($time-[TimeSpan]::Parse($scheduled[$i-1].stamp)).TotalSeconds+86400) % 86400) -eq 10) 'An interval was skipped' }
         }
         Command 4003; Wait-For { [ClockWorker]::Status() -eq 'Updates paused' } 'Pause failed'
@@ -108,17 +109,41 @@ try {
         Wait-For { [ClockWorker]::Status().StartsWith('Connected · updated ') } 'Interrupted transfer did not recover'
         $lockWatch = [Diagnostics.Stopwatch]::StartNew()
         [ClockWorker]::PostMessage([ClockWorker]::Controller(),0x2b1,[IntPtr]7,[IntPtr]::Zero) | Out-Null
-        Wait-For { [ClockWorker]::Status() -match '^Locked at (\d\d:\d\d:\d\d) · 0 min$' } 'Lock event did not replace the normal clock'
+        Wait-For { [ClockWorker]::Status() -match '^Locked at (\d\d:\d\d:\d\d) · 0 min\nUpdated ' } 'Lock event did not add the lock overlay'
         $initialLockStatus = [ClockWorker]::Status()
         $lockStamp = $initialLockStatus.Substring(10,8)
+        $lockedWeatherBefore = [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\AnkerClock\Netatmo','FetchedAt',0)
         $lockTimeDifference = [Math]::Abs(([DateTime]::Now.TimeOfDay - [TimeSpan]::Parse($lockStamp)).TotalSeconds)
         Assert ([Math]::Min($lockTimeDifference,86400-$lockTimeDifference) -lt 10) 'The captured lock time differs from the event'
         [ClockWorker]::PostMessage([ClockWorker]::Controller(),0x2b1,[IntPtr]7,[IntPtr]::Zero) | Out-Null
         Start-Sleep -Seconds 12
-        Assert ([ClockWorker]::Status() -eq $initialLockStatus) 'The lock display updated at the regular interval or reset its timestamp'
-        Wait-For { [ClockWorker]::Status().StartsWith("Locked at $lockStamp · 1 min") } 'Elapsed lock minutes did not update' 65000
+        $lockedStatus = [ClockWorker]::Status()
+        Assert ($lockedStatus.StartsWith("Locked at $lockStamp · 0 min`nUpdated ")) 'A duplicate lock event reset the lock timestamp'
+        Assert ($lockedStatus -ne $initialLockStatus) 'The clock stopped updating while locked'
+        Assert ($lockedStatus -match '\nUpdated (\d\d:\d\d:\d\d)\nSent ([\d.]+) s before boundary$') 'A locked clock frame was not scheduled'
+        $lockedClockStamp = $Matches[1]
+        $lockedClockLead = [double]$Matches[2]
+        Assert (([TimeSpan]::Parse($lockedClockStamp).Seconds % 10) -eq 0) 'The locked clock was not snapped to 10 seconds'
+        Assert ($lockedClockLead -ge 0.45 -and $lockedClockLead -le 0.55) 'The locked clock was not selected half a second early'
+        $lockedScheduled = @([pscustomobject]@{stamp=$lockedClockStamp;lead=$lockedClockLead})
+        Wait-For {
+            $currentStatus = [ClockWorker]::Status()
+            if ($currentStatus -match '^Locked at .+\nUpdated (\d\d:\d\d:\d\d)\nSent ([\d.]+) s before boundary$' -and
+                $lockedScheduled[-1].stamp -ne $Matches[1]) {
+                $script:lockedScheduled += [pscustomobject]@{stamp=$Matches[1];lead=[double]$Matches[2]}
+            }
+            $currentStatus.StartsWith("Locked at $lockStamp · 1 min")
+        } 'Elapsed lock minutes did not update' 65000
         $lockedMinuteAtSeconds = $lockWatch.Elapsed.TotalSeconds
-        Assert ($lockedMinuteAtSeconds -ge 58 -and $lockedMinuteAtSeconds -le 65) 'The first locked minute missed its elapsed-time boundary'
+        $lockedWeatherAfter = [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\AnkerClock\Netatmo','FetchedAt',0)
+        Assert ($lockedMinuteAtSeconds -ge 59 -and $lockedMinuteAtSeconds -le 71) 'The lock duration did not advance on the next clock frame'
+        Assert ($lockedScheduled.Count -ge 4) 'The locked clock did not keep updating through its first minute'
+        for ($i=0; $i -lt $lockedScheduled.Count; $i++) {
+            $time = [TimeSpan]::Parse($lockedScheduled[$i].stamp)
+            Assert (($time.Seconds % 10) -eq 0) 'A locked frame was not snapped to 10 seconds'
+            Assert ($lockedScheduled[$i].lead -ge 0.45 -and $lockedScheduled[$i].lead -le 0.55) 'A locked frame was not selected half a second early'
+            if ($i -gt 0) { Assert (((($time-[TimeSpan]::Parse($lockedScheduled[$i-1].stamp)).TotalSeconds+86400) % 86400) -eq 10) 'An interval was skipped while locked' }
+        }
         Assert ([ClockWorker]::Status() -match 'Sent ([\d.]+) s before boundary$') 'The locked minute was selected late'
         $lockedMinuteLead = [double]$Matches[1]
         Assert ($lockedMinuteLead -ge 0.45 -and $lockedMinuteLead -le 0.55) 'The locked minute was not selected half a second early'
@@ -132,15 +157,13 @@ try {
         Assert-CurrentTime 'Connected · updated '
         Command 4003; Wait-For { [ClockWorker]::Status() -eq 'Updates paused' } 'Final pause failed'
         $after = Probe
-        Assert ($after.galleryCount -eq $before.galleryCount) 'Clock frames accumulated in the gallery'
-        $protectedSlots = $before.galleryBitmap -band (-bnot (1 -shl $before.selectedSlot))
-        Assert (($after.galleryBitmap -band $protectedSlots) -eq $protectedSlots) 'An unrelated gallery slot was removed'
+        Assert ($after.galleryCount -eq 1) 'Old images accumulated in the clock gallery'
         Assert ($null -eq [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\AnkerClock','PendingFrame',$null)) 'Recovery left a pending transfer'
         & (Join-Path (Split-Path $Exe) 'AnkerClockTests.exe') --capture-current $outputDir | Out-Null
         Assert ($LASTEXITCODE -eq 0) 'Physical image readback failed'
     }
     Stop-Clock
-    $result = [ordered]@{assertions=$assertions;hardware=[bool]$Hardware;startedLocked=$startedLocked;scheduled=$scheduled;cancelAndProbeMs=$cancelMs;injectedLockEvents=$true;lockStamp=$lockStamp;lockedMinuteAtSeconds=$lockedMinuteAtSeconds;lockedMinuteLead=$lockedMinuteLead}
+    $result = [ordered]@{assertions=$assertions;hardware=[bool]$Hardware;startedLocked=$startedLocked;scheduled=$scheduled;cancelAndProbeMs=$cancelMs;injectedLockEvents=$true;lockStamp=$lockStamp;lockedScheduled=$lockedScheduled;lockedMinuteAtSeconds=$lockedMinuteAtSeconds;lockedMinuteLead=$lockedMinuteLead;weatherRefreshedWhileLocked=($lockedWeatherAfter -gt $lockedWeatherBefore)}
     $result | ConvertTo-Json -Depth 4 | Set-Content "$outputDir\review-worker-results.json"
     $result | ConvertTo-Json -Depth 4
 } finally {
